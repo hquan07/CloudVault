@@ -1,0 +1,445 @@
+services:
+  # DATABASE — MySQL 8.0
+  mysql:
+    image: mysql:8.0
+    container_name: cloudvault-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cloudvault-network
+
+  # CACHE — Redis 7
+  redis:
+    image: redis:7-alpine
+    container_name: cloudvault-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cloudvault-network
+
+  # OBJECT STORAGE — MinIO (S3-compatible)
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: cloudvault-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cloudvault-network
+
+  # MinIO bucket initialization
+  minio-init:
+    image: quay.io/minio/mc:latest
+    container_name: cloudvault-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set cloudvault http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb cloudvault/${MINIO_BUCKET_FILES} --ignore-existing;
+      mc mb cloudvault/${MINIO_BUCKET_THUMBNAILS} --ignore-existing;
+      mc mb cloudvault/${MINIO_BUCKET_AVATARS} --ignore-existing;
+      mc anonymous set download cloudvault/${MINIO_BUCKET_THUMBNAILS};
+      mc anonymous set download cloudvault/${MINIO_BUCKET_AVATARS};
+      echo 'MinIO buckets initialized successfully!';
+      "
+    networks:
+      - cloudvault-network
+
+  # MESSAGE BROKER — Kafka + Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: cloudvault-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc localhost 2181 | grep -q Zookeeper"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - cloudvault-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cloudvault-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cloudvault-network
+
+  # Kafka topic initialization
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cloudvault-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Creating Kafka topics...';
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_FILE_EVENTS} --partitions 3 --replication-factor 1;
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_USER_EVENTS} --partitions 3 --replication-factor 1;
+      echo 'Kafka topics created successfully!';
+      kafka-topics --list --bootstrap-server kafka:29092;
+      "
+    networks:
+      - cloudvault-network
+
+  # Kafka UI — Web interface for monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: cloudvault-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cloudvault
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+    networks:
+      - cloudvault-network
+
+  # SEARCH ENGINE — Elasticsearch + Kibana
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: cloudvault-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=cloudvault-cluster
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cloudvault-network
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: cloudvault-kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports:
+      - "5601:5601"
+    networks:
+      - cloudvault-network
+
+  # MONITORING — Prometheus + Grafana + Jaeger
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: cloudvault-jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    networks:
+      - cloudvault-network
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: cloudvault-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - cloudvault-network
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: cloudvault-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: cloudvault_grafana_2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - cloudvault-network
+
+  # REVERSE PROXY — Nginx
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cloudvault-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT}:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - mysql
+      - redis
+      - frontend
+    networks:
+      - cloudvault-network
+
+  # FRONTEND SERVICE
+  frontend:
+    build: ./frontend
+    container_name: cloudvault-frontend
+    restart: unless-stopped
+    env_file: .env
+    # We don't necessarily need to map port 3000 to the host since nginx will proxy it,
+    # but exposing it for direct access debugging is fine.
+    ports:
+      - "3000:3000"
+    networks:
+      - cloudvault-network
+
+  # BACKEND SERVICES
+  auth-service:
+    build: ./services/auth-service
+    container_name: cloudvault-auth
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./services/auth-service:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  file-service:
+    build: ./services/file-service
+    container_name: cloudvault-files
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+    ports:
+      - "8002:8000"
+    extra_hosts:
+      - "localhost:host-gateway"
+    volumes:
+      - ./services/file-service:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  metadata-service:
+    build: ./services/metadata-service
+    container_name: cloudvault-metadata
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./services/metadata-service:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  # KAFKA WORKERS
+  thumbnail-worker:
+    build: ./workers/thumbnail-worker
+    container_name: cloudvault-thumbnail-worker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/thumbnail-worker:/app
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  search-indexer:
+    build: ./workers/search-indexer
+    container_name: cloudvault-search-indexer
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/search-indexer:/app
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  audit-logger:
+    build: ./workers/audit-logger
+    container_name: cloudvault-audit-logger
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/audit-logger:/app
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+  zip-extractor-worker:
+    build: ./workers/zip-extractor-worker
+    container_name: cloudvault-zip-extractor
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
+# VOLUMES
+volumes:
+  mysql-data:
+    driver: local
+  redis-data:
+    driver: local
+  minio-data:
+    driver: local
+  zookeeper-data:
+    driver: local
+  zookeeper-log:
+    driver: local
+  kafka-data:
+    driver: local
+  es-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# NETWORKS
+networks:
+  cloudvault-network:
+    driver: bridge
+    name: cloudvault-network

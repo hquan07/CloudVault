@@ -1,0 +1,32 @@
+# Node
+node_modules/
+.next/
+out/
+build/
+dist/
+.env*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+env/
+.venv/
+.env
+
+# MacOS
+.DS_Store
+
+# Docker/Data
+/infrastructure/grafana/data/
+/infrastructure/prometheus/data/
+/mysql-data/
+/minio-data/
+/redis-data/
+/es-data/
+/zookeeper-data/
+/kafka-data/

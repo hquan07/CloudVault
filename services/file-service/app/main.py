@@ -1,0 +1,588 @@
+"""
+CloudVault — File Service Main Application
+
+Endpoints matching the frontend api.ts contract:
+  POST   /api/v1/files/upload             — upload a file
+  GET    /api/v1/files/:id/download       — get presigned download URL
+  DELETE /api/v1/files/:id                — soft-delete (move to trash)
+  GET    /api/v1/files/trash/list         — list trashed files
+  DELETE /api/v1/files/:id/permanent      — permanent delete
+  POST   /api/v1/files/:id/restore        — restore from trash
+  POST   /api/v1/files/:id/copy           — copy a file
+  POST   /api/v1/files/:id/move           — move a file to another folder
+  POST   /api/v1/folders                  — create a folder
+  GET    /api/v1/folders                  — list folders
+"""
+
+import hashlib
+import json
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import jwt as pyjwt
+from aiokafka import AIOKafkaProducer
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from minio import Minio
+from prometheus_fastapi_instrumentator import Instrumentator
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.database import get_db
+from app.models import User, File, Folder, FileVersion
+
+# ── Global clients ──
+minio_client: Minio | None = None
+minio_public_client: Minio | None = None
+kafka_producer: AIOKafkaProducer | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global minio_client, minio_public_client, kafka_producer
+
+    # MinIO
+    minio_client = Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ROOT_USER,
+        secret_key=settings.MINIO_ROOT_PASSWORD,
+        secure=False,
+    )
+
+    # MinIO Client for presigned URLs (uses public endpoint)
+    minio_public_client = Minio(
+        "localhost:9000",
+        access_key=settings.MINIO_ROOT_USER,
+        secret_key=settings.MINIO_ROOT_PASSWORD,
+        secure=False,
+    )
+
+    # Kafka
+    try:
+        kafka_producer = AIOKafkaProducer(
+            bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+            value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
+        )
+        await kafka_producer.start()
+    except Exception:
+        kafka_producer = None
+
+    yield
+
+    if kafka_producer:
+        await kafka_producer.stop()
+
+
+# ── FastAPI App ──
+
+app = FastAPI(
+    title="CloudVault File Service",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+Instrumentator().instrument(app).expose(app)
+
+from app.telemetry import setup_opentelemetry
+setup_opentelemetry(app, "file-service")
+
+
+# ── Dependencies ──
+
+async def get_current_user(
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = pyjwt.decode(
+            token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user_id = payload.get("sub")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+async def _emit_event(event_type: str, data: dict):
+    if kafka_producer:
+        try:
+            await kafka_producer.send_and_wait(
+                settings.KAFKA_TOPIC_FILE_EVENTS,
+                {"event": event_type, **data},
+            )
+        except Exception:
+            pass  # Non-critical
+
+
+def _file_to_dict(f: File) -> dict:
+    return {
+        "id": f.id,
+        "filename": f.filename,
+        "original_name": f.original_name,
+        "mime_type": f.mime_type,
+        "size": f.size,
+        "folder_id": f.folder_id,
+        "user_id": f.user_id,
+        "minio_bucket": f.minio_bucket,
+        "minio_key": f.minio_key,
+        "checksum_sha256": f.checksum_sha256,
+        "thumbnail_key": f.thumbnail_key,
+        "current_version": f.current_version,
+        "is_starred": f.is_starred,
+        "is_deleted": f.is_deleted,
+        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+    }
+
+
+# ── Health Check ──
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "file"}
+
+
+# ══════════════════════════════════════════════
+# FILE UPLOAD / DOWNLOAD
+# ══════════════════════════════════════════════
+
+@app.post("/api/v1/files/upload", status_code=201)
+async def upload_file(
+    file: UploadFile,
+    folder_id: str = Form(None),
+    relative_path: str = Form(None),
+    is_encrypted: str = Form(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Read file content
+    content = await file.read()
+    file_size = len(content)
+
+    # Check storage quota
+    if user.storage_used + file_size > user.storage_quota:
+        raise HTTPException(status_code=413, detail="Storage quota exceeded")
+
+    # Generate unique key
+    file_id = str(uuid.uuid4())
+    ext = file.filename.rsplit(".", 1)[-1] if "." in file.filename else ""
+    minio_key = f"{user.id}/{file_id}{f'.{ext}' if ext else ''}"
+
+    # Compute checksum
+    checksum = hashlib.sha256(content).hexdigest()
+
+    # Upload to MinIO
+    import io
+    try:
+        minio_client.put_object(
+            settings.MINIO_BUCKET_FILES,
+            minio_key,
+            io.BytesIO(content),
+            length=file_size,
+            content_type=file.content_type or "application/octet-stream",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload to storage failed: {str(e)}")
+
+    # Handle folder from relative_path (e.g., drag-and-drop folder upload)
+    actual_folder_id = folder_id
+    if relative_path and "/" in relative_path:
+        # Create intermediate folders
+        parts = relative_path.split("/")[:-1]  # Exclude filename
+        parent_id = folder_id
+        for part_name in parts:
+            existing = await db.execute(
+                select(Folder).where(
+                    Folder.user_id == user.id,
+                    Folder.name == part_name,
+                    Folder.parent_id == parent_id if parent_id else Folder.parent_id == None,
+                    Folder.is_deleted == False,
+                )
+            )
+            folder = existing.scalar_one_or_none()
+            if not folder:
+                folder = Folder(
+                    name=part_name,
+                    parent_id=parent_id,
+                    user_id=user.id,
+                    path=f"/{part_name}",
+                )
+                db.add(folder)
+                await db.flush()
+                await db.refresh(folder)
+            parent_id = folder.id
+        actual_folder_id = parent_id
+
+    # Create file record
+    db_file = File(
+        filename=f"{file_id}{f'.{ext}' if ext else ''}",
+        original_name=file.filename or "unnamed",
+        mime_type=file.content_type or "application/octet-stream",
+        size=file_size,
+        folder_id=actual_folder_id,
+        user_id=user.id,
+        minio_bucket=settings.MINIO_BUCKET_FILES,
+        minio_key=minio_key,
+        checksum_sha256=checksum,
+    )
+    db.add(db_file)
+    await db.flush()
+    await db.refresh(db_file)
+
+    # Create initial version
+    version = FileVersion(
+        file_id=db_file.id,
+        version_number=1,
+        minio_key=minio_key,
+        size=file_size,
+        checksum_sha256=checksum,
+        uploaded_by=user.id,
+    )
+    db.add(version)
+
+    # Update storage used
+    user.storage_used += file_size
+    await db.commit()
+
+    # Emit Kafka event
+    await _emit_event("FILE_UPLOADED", {
+        "file_id": db_file.id,
+        "user_id": user.id,
+        "filename": db_file.original_name,
+        "mime_type": db_file.mime_type,
+        "size": file_size,
+        "minio_key": minio_key,
+    })
+
+    return _file_to_dict(db_file)
+
+
+@app.get("/api/v1/files/{file_id}/download")
+async def download_file(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Generate presigned URL (valid for 1 hour)
+    from datetime import timedelta
+    try:
+        response_headers = {"response-content-disposition": f'inline; filename="{f.original_name}"'}
+        
+        # Force UTF-8 for text files to fix encoding issues in browser preview
+        if f.mime_type and f.mime_type.startswith("text/") and "charset" not in f.mime_type:
+            response_headers["response-content-type"] = f"{f.mime_type}; charset=utf-8"
+            
+        url = minio_public_client.presigned_get_object(
+            f.minio_bucket,
+            f.minio_key,
+            expires=timedelta(hours=1),
+            response_headers=response_headers,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate download URL: {str(e)}")
+
+    await _emit_event("FILE_DOWNLOADED", {
+        "file_id": f.id,
+        "user_id": user.id,
+        "filename": f.original_name,
+    })
+
+    return {"download_url": url}
+
+
+# ══════════════════════════════════════════════
+# TRASH / DELETE / RESTORE
+# ══════════════════════════════════════════════
+
+@app.delete("/api/v1/files/{file_id}")
+async def soft_delete_file(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == False)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    f.is_deleted = True
+    f.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    await _emit_event("FILE_DELETED", {
+        "file_id": f.id, "user_id": user.id, "filename": f.original_name,
+    })
+
+    return {"detail": "File moved to trash"}
+
+
+@app.get("/api/v1/files/trash/list")
+async def list_trash(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File)
+        .where(File.user_id == user.id, File.is_deleted == True)
+        .order_by(File.deleted_at.desc())
+    )
+    files = result.scalars().all()
+    return {"files": [_file_to_dict(f) for f in files]}
+
+
+@app.delete("/api/v1/files/{file_id}/permanent")
+async def permanent_delete(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Delete from MinIO
+    try:
+        minio_client.remove_object(f.minio_bucket, f.minio_key)
+    except Exception:
+        pass
+
+    # Update storage
+    user.storage_used = max(0, user.storage_used - f.size)
+
+    await db.delete(f)
+    await db.commit()
+
+    return {"detail": "File permanently deleted"}
+
+
+@app.post("/api/v1/files/{file_id}/restore")
+async def restore_file(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == True)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found in trash")
+
+    f.is_deleted = False
+    f.deleted_at = None
+    await db.commit()
+
+    await _emit_event("FILE_RESTORED", {
+        "file_id": f.id, "user_id": user.id, "filename": f.original_name,
+    })
+
+    return _file_to_dict(f)
+
+
+# ══════════════════════════════════════════════
+# COPY / MOVE
+# ══════════════════════════════════════════════
+
+@app.post("/api/v1/files/{file_id}/copy")
+async def copy_file(
+    file_id: str,
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == False)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Copy object in MinIO
+    new_id = str(uuid.uuid4())
+    ext = f.filename.rsplit(".", 1)[-1] if "." in f.filename else ""
+    new_key = f"{user.id}/{new_id}{f'.{ext}' if ext else ''}"
+
+    import io
+    try:
+        data = minio_client.get_object(f.minio_bucket, f.minio_key)
+        content = data.read()
+        data.close()
+        minio_client.put_object(
+            settings.MINIO_BUCKET_FILES,
+            new_key,
+            io.BytesIO(content),
+            length=len(content),
+            content_type=f.mime_type,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to copy file: {str(e)}")
+
+    new_file = File(
+        filename=f"{new_id}{f'.{ext}' if ext else ''}",
+        original_name=f"Copy of {f.original_name}",
+        mime_type=f.mime_type,
+        size=f.size,
+        folder_id=body.get("folder_id") or f.folder_id,
+        user_id=user.id,
+        minio_bucket=settings.MINIO_BUCKET_FILES,
+        minio_key=new_key,
+        checksum_sha256=f.checksum_sha256,
+    )
+    db.add(new_file)
+
+    user.storage_used += f.size
+    await db.commit()
+    await db.refresh(new_file)
+
+    await _emit_event("FILE_COPIED", {
+        "file_id": new_file.id, "source_id": f.id, "user_id": user.id,
+    })
+
+    return _file_to_dict(new_file)
+
+
+@app.post("/api/v1/files/{file_id}/move")
+async def move_file(
+    file_id: str,
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == False)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    new_folder_id = body.get("folder_id")
+    if new_folder_id:
+        # Verify folder exists
+        folder_result = await db.execute(
+            select(Folder).where(Folder.id == new_folder_id, Folder.user_id == user.id)
+        )
+        if not folder_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Destination folder not found")
+
+    f.folder_id = new_folder_id
+    await db.commit()
+    await db.refresh(f)
+
+    await _emit_event("FILE_MOVED", {
+        "file_id": f.id, "user_id": user.id, "folder_id": new_folder_id,
+    })
+
+    return _file_to_dict(f)
+
+
+# ══════════════════════════════════════════════
+# FOLDERS
+# ══════════════════════════════════════════════
+
+@app.post("/api/v1/folders", status_code=201)
+async def create_folder(
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Folder name is required")
+
+    parent_id = body.get("parent_id")
+    path = f"/{name}"
+    depth = 0
+
+    if parent_id:
+        parent_result = await db.execute(
+            select(Folder).where(Folder.id == parent_id, Folder.user_id == user.id)
+        )
+        parent = parent_result.scalar_one_or_none()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent folder not found")
+        path = f"{parent.path}/{name}"
+        depth = parent.depth + 1
+
+    folder = Folder(
+        name=name,
+        parent_id=parent_id,
+        user_id=user.id,
+        path=path,
+        depth=depth,
+    )
+    db.add(folder)
+    await db.commit()
+    await db.refresh(folder)
+
+    return {
+        "id": folder.id,
+        "name": folder.name,
+        "parent_id": folder.parent_id,
+        "path": folder.path,
+        "depth": folder.depth,
+        "created_at": folder.created_at.isoformat() if folder.created_at else None,
+    }
+
+
+@app.get("/api/v1/folders")
+async def list_folders(
+    parent_id: str = Query(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Folder).where(
+        Folder.user_id == user.id, Folder.is_deleted == False
+    )
+    if parent_id:
+        query = query.where(Folder.parent_id == parent_id)
+    else:
+        query = query.where(Folder.parent_id == None)
+
+    query = query.order_by(Folder.name.asc())
+    result = await db.execute(query)
+    folders = result.scalars().all()
+
+    return {
+        "folders": [
+            {
+                "id": f.id,
+                "name": f.name,
+                "parent_id": f.parent_id,
+                "path": f.path,
+                "depth": f.depth,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in folders
+        ]
+    }

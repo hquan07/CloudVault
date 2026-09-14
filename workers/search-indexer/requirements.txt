@@ -1,0 +1,8 @@
+asyncmy==0.2.9
+aiokafka==0.10.0
+elasticsearch[async]==8.11.0
+pydantic-settings==2.7.0
+minio==7.2.4
+PyMuPDF==1.23.25
+python-docx==1.1.0
+redis==5.2.1

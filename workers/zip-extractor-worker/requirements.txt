@@ -1,0 +1,5 @@
+minio==7.2.12
+aiokafka==0.10.0
+asyncmy==0.2.9
+sqlalchemy[asyncio]==2.0.36
+pydantic-settings==2.7.0
