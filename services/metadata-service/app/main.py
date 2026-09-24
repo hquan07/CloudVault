@@ -35,17 +35,18 @@ import redis.asyncio as aioredis
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin
 from app.models import User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily
 
 # ── Elasticsearch & Redis clients ──
 es_client: AsyncElasticsearch | None = None
 redis_client: aioredis.Redis | None = None
 minio_public_client = Minio(
-    settings.MINIO_ENDPOINT,
+    settings.MINIO_PUBLIC_ENDPOINT,
     access_key=settings.MINIO_ROOT_USER,
     secret_key=settings.MINIO_ROOT_PASSWORD,
     secure=False,
+    region="us-east-1",
 )
 
 
@@ -235,11 +236,10 @@ async def list_files(
 ):
     query = select(File).where(File.user_id == user.id, File.is_deleted == is_deleted)
 
-    if folder_id is not None:
-        if folder_id == "root":
-            query = query.where(File.folder_id == None)
-        else:
-            query = query.where(File.folder_id == folder_id)
+    if folder_id is not None and folder_id != "root":
+        query = query.where(File.folder_id == folder_id)
+    elif folder_id == "root" or folder_id is None:
+        query = query.where(File.folder_id == None)
     if is_starred is not None:
         query = query.where(File.is_starred == is_starred)
     if mime_type is not None:
@@ -671,6 +671,7 @@ async def access_share_public(
             response_headers=response_headers,
         )
     except Exception as e:
+        print(f"Error generating presigned URL: {e}")
         download_url = None
 
     return {
@@ -727,6 +728,7 @@ async def access_share_with_password(
             response_headers=response_headers,
         )
     except Exception as e:
+        print(f"Error generating presigned URL: {e}")
         download_url = None
 
     return {
@@ -815,3 +817,43 @@ async def revoke_link(
 
     link.is_active = False
     await db.commit()
+
+@app.get("/api/v1/metadata/admin/stats")
+async def get_metadata_admin_stats(
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    # Total files and folders
+    total_files = await db.scalar(select(func.count(File.id))) or 0
+    total_folders = await db.scalar(select(func.count(Folder.id))) or 0
+    
+    # Files by mime type
+    mime_res = await db.execute(select(File.mime_type, func.count(File.id)).group_by(File.mime_type))
+    mime_types = [{"name": row[0] or "unknown", "count": row[1]} for row in mime_res.all()]
+    
+    # Uploads by date (last 30 days)
+    # Using python datetime for filtering if needed, but here we just get all grouped by date
+    from datetime import datetime, timedelta
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    
+    date_query = select(
+        func.date(File.created_at).label("date"),
+        func.count(File.id).label("count"),
+        func.sum(File.size).label("size")
+    ).where(File.created_at >= thirty_days_ago).group_by(func.date(File.created_at)).order_by(func.date(File.created_at))
+    
+    date_res = await db.execute(date_query)
+    upload_timeline = []
+    for row in date_res.all():
+        upload_timeline.append({
+            "date": str(row[0]),
+            "count": row[1],
+            "size": int(row[2] or 0)
+        })
+        
+    return {
+        "total_files": total_files,
+        "total_folders": total_folders,
+        "files_by_type": mime_types,
+        "upload_timeline": upload_timeline
+    }

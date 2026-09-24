@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud } from 'lucide-react';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
@@ -22,20 +22,53 @@ export interface FileItem {
   is_starred?: boolean;
 }
 
+export interface FolderItem {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  path: string;
+  depth: number;
+  created_at: string;
+}
+
 export default function DrivePage() {
   const { refreshUser } = useAuth();
   const [files, setFiles] = useState<FileItem[]>([]);
+  const [folders, setFolders] = useState<FolderItem[]>([]);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [folderPath, setFolderPath] = useState<{id: string, name: string}[]>([]);
+  
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [shareFile, setShareFile] = useState<FileItem | null>(null);
 
+  // Drag & Drop / Dropdown states
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsUploadMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const loadFiles = async () => {
     setLoading(true);
     try {
-      const data = await metaApi.listFiles({ sort_by: 'created_at', sort_order: 'desc' }) as { files: FileItem[] };
+      const data = await metaApi.listFiles({ 
+        sort_by: 'created_at', 
+        sort_order: 'desc',
+        folder_id: currentFolderId || 'root'
+      }) as { files: FileItem[], folders: FolderItem[] };
       setFiles(data.files || []);
+      setFolders(data.folders || []);
     } catch (err: any) {
       setError(err.message || 'Failed to load files');
     }
@@ -44,17 +77,19 @@ export default function DrivePage() {
 
   useEffect(() => {
     loadFiles();
-  }, []);
+  }, [currentFolderId]);
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return;
-    const file = e.target.files[0];
+  const processFiles = async (filesArray: File[]) => {
+    if (filesArray.length === 0) return;
     
     setUploading(true);
     setError('');
     
     try {
-      await fileApi.upload(file);
+      for (const file of filesArray) {
+        const relativePath = (file as any).customRelativePath || file.webkitRelativePath || undefined;
+        await fileApi.upload(file, currentFolderId || undefined, relativePath);
+      }
       await loadFiles();
       refreshUser();
     } catch (err: any) {
@@ -62,6 +97,13 @@ export default function DrivePage() {
     } finally {
       setUploading(false);
     }
+  };
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    await processFiles(Array.from(e.target.files));
+    e.target.value = ''; // Reset input
+    setIsUploadMenuOpen(false);
   };
 
   const handleDownload = async (fileId: string) => {
@@ -95,25 +137,150 @@ export default function DrivePage() {
     }
   };
 
+  const handleNavigate = (folder: FolderItem) => {
+    setCurrentFolderId(folder.id);
+    setFolderPath([...folderPath, { id: folder.id, name: folder.name }]);
+  };
+
+  const handleNavigateUp = () => {
+    const newPath = [...folderPath];
+    newPath.pop();
+    setFolderPath(newPath);
+    setCurrentFolderId(newPath.length > 0 ? newPath[newPath.length - 1].id : null);
+  };
+
+  // Drag & Drop Handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragActive(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    // Prevent flickering when dragging over child elements
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setIsDragActive(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragActive(false);
+    
+    const items = e.dataTransfer.items;
+    if (!items) return;
+
+    const filesToUpload: File[] = [];
+
+    const readDirectory = async (dirEntry: any, path: string = '') => {
+      const dirReader = dirEntry.createReader();
+      const entries = await new Promise<any[]>((resolve) => {
+        dirReader.readEntries((results: any[]) => resolve(results));
+      });
+
+      for (const entry of entries) {
+        if (entry.isFile) {
+          const file = await new Promise<File>((resolve) => entry.file(resolve));
+          (file as any).customRelativePath = `${path}${entry.name}`;
+          filesToUpload.push(file);
+        } else if (entry.isDirectory) {
+          await readDirectory(entry, `${path}${entry.name}/`);
+        }
+      }
+    };
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const entry = item.webkitGetAsEntry();
+        if (entry) {
+          if (entry.isFile) {
+            const file = await new Promise<File>((resolve) => (entry as any).file(resolve));
+            filesToUpload.push(file);
+          } else if (entry.isDirectory) {
+            await readDirectory(entry, `${entry.name}/`);
+          }
+        }
+      }
+    }
+
+    if (filesToUpload.length > 0) {
+      await processFiles(filesToUpload);
+    }
+  };
+
   return (
-    <div className="space-y-6">
+    <div 
+      className="space-y-6 relative min-h-[80vh] w-full"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Smart Drag & Drop Overlay */}
+      {isDragActive && (
+        <div className="absolute inset-0 z-50 bg-cyan-950/40 backdrop-blur-sm border-2 border-dashed border-cyan-500 rounded-3xl flex flex-col items-center justify-center transition-all">
+          <div className="w-24 h-24 bg-gray-900 rounded-full flex items-center justify-center mb-6 shadow-2xl shadow-cyan-900/50">
+            <UploadCloud size={48} className="text-cyan-400 animate-bounce" />
+          </div>
+          <h2 className="text-3xl font-bold text-white mb-2">Drop to Upload</h2>
+          <p className="text-cyan-200 text-lg">Release files or folders to securely store them.</p>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <h1 className="text-2xl font-bold">My Files</h1>
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            {currentFolderId && (
+              <button onClick={handleNavigateUp} className="p-1 hover:bg-gray-800 rounded-lg text-gray-400 hover:text-white transition-colors">
+                <ChevronLeft size={24} />
+              </button>
+            )}
+            {currentFolderId ? folderPath[folderPath.length - 1]?.name : 'My Files'}
+          </h1>
+          {folderPath.length > 0 && (
+            <div className="text-sm text-gray-500 mt-1">
+              Home {folderPath.map(f => ` / ${f.name}`)}
+            </div>
+          )}
+        </div>
         
-        <div className="relative">
-          <input 
-            type="file" 
-            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
-            onChange={handleUpload}
-            disabled={uploading}
-          />
+        {/* Unified Upload Dropdown */}
+        <div className="flex items-center gap-3 relative" ref={dropdownRef}>
           <button 
+            onClick={() => setIsUploadMenuOpen(!isUploadMenuOpen)}
             disabled={uploading}
-            className="flex items-center gap-2 px-5 py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-800 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-colors shadow-lg shadow-cyan-900/20"
+            className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 disabled:opacity-50 text-white font-medium rounded-xl transition-all shadow-lg shadow-blue-900/20"
           >
-            {uploading ? <CloudUpload className="animate-bounce" size={20} /> : <Upload size={20} />}
-            {uploading ? 'Uploading...' : 'Upload File'}
+            {uploading ? <CloudUpload className="animate-bounce" size={20} /> : <Plus size={20} />}
+            {uploading ? 'Uploading...' : 'New'}
           </button>
+
+          {isUploadMenuOpen && !uploading && (
+            <div className="absolute top-full mt-2 right-0 w-48 bg-gray-900 border border-gray-700 rounded-xl shadow-xl overflow-hidden z-50 py-1">
+              <label className="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 cursor-pointer text-gray-200 transition-colors">
+                <FileIcon size={18} className="text-cyan-400" />
+                <span>Upload Files</span>
+                <input 
+                  type="file" 
+                  className="hidden" 
+                  onChange={handleUpload}
+                  multiple
+                />
+              </label>
+              <label className="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 cursor-pointer text-gray-200 transition-colors">
+                <FolderOpen size={18} className="text-purple-400" />
+                <span>Upload Folder</span>
+                <input 
+                  type="file" 
+                  // @ts-ignore
+                  webkitdirectory="true"
+                  directory="true"
+                  multiple
+                  className="hidden" 
+                  onChange={handleUpload}
+                />
+              </label>
+            </div>
+          )}
         </div>
       </div>
 
@@ -125,26 +292,31 @@ export default function DrivePage() {
 
       {loading ? (
         <div className="p-12 text-center text-gray-500">Loading your files...</div>
-      ) : files.length === 0 ? (
+      ) : files.length === 0 && folders.length === 0 ? (
         <div className="text-center py-24 px-8 border-2 border-dashed border-gray-800 rounded-2xl bg-gray-900/30">
           <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-400">
             <FolderOpen size={32} />
           </div>
-          <h3 className="text-xl font-medium text-gray-200 mb-2">Your vault is empty</h3>
-          <p className="text-gray-500 max-w-sm mx-auto mb-6">Upload files to securely store them in the cloud. They will appear here.</p>
-          <div className="relative inline-block">
-            <input 
-              type="file" 
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
-              onChange={handleUpload}
-            />
-            <button className="px-6 py-2.5 bg-gray-800 hover:bg-gray-700 text-white font-medium rounded-xl transition-colors">
-              Browse Files
-            </button>
-          </div>
+          <h3 className="text-xl font-medium text-gray-200 mb-2">This folder is empty</h3>
+          <p className="text-gray-500 max-w-sm mx-auto mb-6">Drag and drop files or folders here, or use the New button.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {folders.map(folder => (
+            <div 
+              key={folder.id} 
+              className="group bg-gray-900 border border-gray-700 rounded-2xl p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4"
+              onClick={() => handleNavigate(folder)}
+            >
+              <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-yellow-500 shrink-0">
+                <FolderOpen size={24} className="fill-current opacity-80" />
+              </div>
+              <h4 className="font-medium text-gray-200 truncate flex-1" title={folder.name}>
+                {folder.name}
+              </h4>
+            </div>
+          ))}
+
           {files.map(file => (
             <div 
               key={file.id} 
@@ -189,7 +361,7 @@ export default function DrivePage() {
               </h4>
               <div className="flex items-center justify-between text-xs text-gray-500">
                 <span>{formatBytes(file.size)}</span>
-                <span>{formatRelative(file.created_at)}</span>
+                <span>{file.created_at ? formatRelative(file.created_at) : 'Unknown date'}</span>
               </div>
             </div>
           ))}

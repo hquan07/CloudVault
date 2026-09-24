@@ -20,8 +20,7 @@ A **production-grade, self-hosted personal cloud storage platform** built with m
 - **Blazing Fast Search:** Elasticsearch integration with edge n-gram analysis for instant full-text search and autocomplete.
 - **Event-Driven Architecture:** Apache Kafka streams for asynchronous processing (thumbnail generation, indexing, audit logging).
 - **Comprehensive Audit Trail:** Real-time logging of all user and file activities for security and analytics.
-- **Enterprise Observability:** Full distributed tracing with OpenTelemetry and Jaeger, plus Prometheus metrics and Grafana dashboards.
-- **Beautiful UI:** A premium Next.js 14 frontend featuring glassmorphism, dark/light modes, and drag-and-drop capabilities.
+- **Beautiful UI (WIP):** A premium Next.js 14 frontend featuring glassmorphism, dark/light modes, and drag-and-drop capabilities.
 
 ---
 
@@ -51,8 +50,6 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
     │MySQL ││MinIO ││Kafka │◄┤ Audit Logger     │
     │Redis ││      ││  ES  │ └──────────────────┘
     └──────┘└──────┘└──────┘
-    
-    [ Telemetry & Tracing: OpenTelemetry -> Jaeger -> Grafana ]
 ```
 
 ---
@@ -69,7 +66,6 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 | **Message Broker**| Apache Kafka, Zookeeper | Async event streaming (`file-events`) |
 | **Search Engine** | Elasticsearch 8.11 | Full-text search and autocomplete |
 | **Monitoring** | Prometheus + Grafana | System metrics and visualization |
-| **Tracing** | OpenTelemetry + Jaeger | Distributed request tracing |
 | **Routing** | Nginx | Reverse proxy and API gateway |
 
 ---
@@ -122,7 +118,6 @@ When running locally via Docker Compose, services are mapped to the following po
 | **Elasticsearch** | `9200` | Search API | — |
 | **Kafka UI** | `8080` | Kafka Cluster Management | — |
 | **Grafana** | `3001` | Metrics Dashboard | `admin` / `cloudvault_grafana_2026` |
-| **Jaeger UI** | `16686`| Distributed Tracing UI | — |
 | **Prometheus** | `9090` | Time-series metrics | — |
 | **MySQL** | `3306` | Relational Database | `root` / `cloudvault_mysql_root_2026` |
 | **Redis** | `6379` | In-memory Cache | — |
@@ -136,7 +131,7 @@ When running locally via Docker Compose, services are mapped to the following po
 - [x] **Phase 3: File Service** — MinIO integration, chunked uploads, presigned URL downloads
 - [x] **Phase 4: Metadata & Workers** — Sharing API, ES search indexer, activity logger, thumbnail generator
 - [x] **Phase 5: Frontend** — Next.js 14 App Router UI, file browser, upload dropzone, glassmorphism design
-- [x] **Phase 6: Admin & Observability** — Admin Panel, Prometheus metrics, Grafana dashboards, OpenTelemetry distributed tracing with Jaeger.
+- [x] **Phase 6: Polish & Deploy** — Prometheus metrics, Grafana dashboards, CI/CD, demo seed script
 
 ---
 

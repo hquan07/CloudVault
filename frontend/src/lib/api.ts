@@ -205,6 +205,7 @@ export const metaApi = {
 /* ── Admin API ── */
 export const adminApi = {
   getStats: () => request(`${AUTH_BASE}/admin/stats`),
+  getMetadataStats: () => request(`${META_BASE}/metadata/admin/stats`),
   getUsers: () => request(`${AUTH_BASE}/admin/users`),
   updateRole: (userId: string, role: string) => 
     request(`${AUTH_BASE}/admin/users/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
