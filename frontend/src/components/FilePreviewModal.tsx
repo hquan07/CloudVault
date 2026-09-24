@@ -207,14 +207,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
                     <FileIcon size={40} />
                   </div>
                   <h4 className="text-gray-200 font-medium text-lg mb-4 text-center truncate w-full">{file.original_name}</h4>
-                  {/* @ts-ignore */}
-                  <ReactPlayer 
-                    url={url!} 
-                    controls 
-                    width="100%" 
-                    height="50px" 
-                    config={{ file: { forceAudio: true } }}
-                  />
+                  <audio src={url!} controls autoPlay className="w-full mt-4" />
                 </div>
               )}
               {isPdf && (
