@@ -425,9 +425,17 @@ export default function DrivePage() {
           <p className="text-gray-500 max-w-sm mx-auto mb-6">The cloud is sleeping. Drag and drop files or folders here to wake it up!</p>
         </div>
       ) : (
-        <motion.div layout className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "flex flex-col gap-2"}>
-          <AnimatePresence>
-          {folders.map(folder => (
+        <AnimatePresence mode="wait">
+          <motion.div 
+            key={viewMode}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.15 }}
+            className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "flex flex-col gap-2"}
+          >
+            <AnimatePresence>
+            {folders.map(folder => (
             <motion.div 
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -529,6 +537,7 @@ export default function DrivePage() {
           ))}
           </AnimatePresence>
         </motion.div>
+        </AnimatePresence>
       )}
 
       {previewFile && (
