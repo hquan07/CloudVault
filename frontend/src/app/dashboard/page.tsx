@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive } from 'lucide-react';
+import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive, LayoutGrid, List } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
@@ -62,6 +62,7 @@ export default function DrivePage() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [folderPath, setFolderPath] = useState<{id: string, name: string}[]>([]);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -339,8 +340,23 @@ export default function DrivePage() {
           )}
         </div>
         
-        {/* Unified Upload Dropdown */}
+        {/* Unified Upload Dropdown & View Toggle */}
         <div className="flex items-center gap-3 relative" ref={dropdownRef}>
+          <div className="flex items-center bg-gray-900 border border-gray-800 rounded-xl p-1">
+            <button 
+              onClick={() => setViewMode('grid')}
+              className={`p-1.5 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-500 hover:text-gray-300'}`}
+            >
+              <LayoutGrid size={18} />
+            </button>
+            <button 
+              onClick={() => setViewMode('list')}
+              className={`p-1.5 rounded-lg transition-colors ${viewMode === 'list' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-500 hover:text-gray-300'}`}
+            >
+              <List size={18} />
+            </button>
+          </div>
+
           <button 
             onClick={() => setIsUploadMenuOpen(!isUploadMenuOpen)}
             disabled={uploading}
@@ -391,15 +407,25 @@ export default function DrivePage() {
           {[...Array(8)].map((_, i) => <SkeletonCard key={i} />)}
         </div>
       ) : files.length === 0 && folders.length === 0 ? (
-        <div className="text-center py-24 px-8 border-2 border-dashed border-gray-800 rounded-2xl bg-gray-900/30">
-          <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-400">
-            <FolderOpen size={32} />
+        <div className="text-center py-24 px-8 border-2 border-dashed border-gray-800 rounded-3xl bg-gray-900/30">
+          <div className="w-32 h-32 mx-auto mb-6 text-gray-700 flex items-center justify-center relative">
+            {/* Cute Empty Cloud SVG */}
+            <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" className="w-full h-full opacity-60">
+              <path d="M 60,110 C 60,85 80,65 105,65 C 110,65 115,66 120,68 C 128,50 148,40 165,50 C 180,60 185,80 180,95 C 190,98 198,105 198,115 C 198,130 185,145 170,145 L 60,145 C 40,145 25,130 25,110 C 25,95 35,80 50,75 C 55,75 60,80 60,110 Z" fill="currentColor" />
+              {/* Sleeping Eyes */}
+              <path d="M 85,110 Q 95,120 105,110" fill="none" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+              <path d="M 125,110 Q 135,120 145,110" fill="none" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+              {/* Zzz */}
+              <text x="145" y="70" fontSize="20" fill="#4b5563" fontWeight="bold">Z</text>
+              <text x="165" y="55" fontSize="16" fill="#4b5563" fontWeight="bold">z</text>
+              <text x="180" y="45" fontSize="12" fill="#4b5563" fontWeight="bold">z</text>
+            </svg>
           </div>
-          <h3 className="text-xl font-medium text-gray-200 mb-2">This folder is empty</h3>
-          <p className="text-gray-500 max-w-sm mx-auto mb-6">Drag and drop files or folders here, or use the New button.</p>
+          <h3 className="text-xl font-medium text-gray-200 mb-2">So empty in here...</h3>
+          <p className="text-gray-500 max-w-sm mx-auto mb-6">The cloud is sleeping. Drag and drop files or folders here to wake it up!</p>
         </div>
       ) : (
-        <motion.div layout className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <motion.div layout className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "flex flex-col gap-2"}>
           <AnimatePresence>
           {folders.map(folder => (
             <motion.div 
@@ -408,19 +434,22 @@ export default function DrivePage() {
               exit={{ opacity: 0, scale: 0.9 }}
               layout
               key={folder.id} 
-              className="group bg-gray-900 border border-gray-700 rounded-2xl p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4"
+              className={`group bg-gray-900 border border-gray-700 p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4 ${viewMode === 'grid' ? 'rounded-2xl' : 'rounded-xl'}`}
               onClick={() => handleNavigate(folder)}
               onContextMenu={(e) => handleContextMenu(e, folder, 'folder')}
             >
-              <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-yellow-500 shrink-0">
-                <FolderOpen size={24} className="fill-current opacity-80" />
+              <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center text-yellow-500 shrink-0">
+                <FolderOpen size={20} className="fill-current opacity-80" />
               </div>
               <h4 className="font-medium text-gray-200 truncate flex-1" title={folder.name}>
                 {folder.name}
               </h4>
+              {viewMode === 'list' && (
+                <div className="text-xs text-gray-500 hidden sm:block w-32 shrink-0">{formatRelative(folder.created_at)}</div>
+              )}
               <button 
                 onClick={(e) => { e.stopPropagation(); setShareFolder(folder); }}
-                className="p-2 text-gray-500 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                className={`p-2 text-gray-500 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg transition-all ${viewMode === 'list' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                 title="Share folder"
               >
                 <Users size={18} />
@@ -435,15 +464,28 @@ export default function DrivePage() {
               exit={{ opacity: 0, scale: 0.9 }}
               layout
               key={file.id} 
-              className="group bg-gray-900 border border-gray-800 rounded-2xl p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex flex-col h-full"
+              className={`group bg-gray-900 border border-gray-800 p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
               onClick={() => setPreviewFile(file)}
               onContextMenu={(e) => handleContextMenu(e, file, 'file')}
             >
-              <div className="flex items-start justify-between mb-4">
-                <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center">
-                  <FileIconDisplay mimeType={file.mime_type} />
+              <div className={`flex items-start justify-between ${viewMode === 'grid' ? 'mb-4' : 'flex-1 items-center gap-4'}`}>
+                <div className={`rounded-xl bg-gray-800 flex items-center justify-center shrink-0 ${viewMode === 'grid' ? 'w-12 h-12' : 'w-10 h-10'}`}>
+                  <FileIconDisplay mimeType={file.mime_type} size={viewMode === 'grid' ? 24 : 20} />
                 </div>
-                <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                
+                {viewMode === 'list' && (
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-medium text-gray-200 truncate" title={file.filename}>{file.filename}</h4>
+                  </div>
+                )}
+                {viewMode === 'list' && (
+                  <div className="text-xs text-gray-500 hidden md:block w-24 shrink-0">{formatBytes(file.size)}</div>
+                )}
+                {viewMode === 'list' && (
+                  <div className="text-xs text-gray-500 hidden sm:block w-32 shrink-0">{formatRelative(file.created_at)}</div>
+                )}
+
+                <div className={`flex space-x-1 transition-opacity ${viewMode === 'list' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                   <button 
                     onClick={(e) => { e.stopPropagation(); handleToggleStar(file.id, !!file.is_starred); }}
                     className={`p-2 rounded-lg transition-colors ${file.is_starred ? 'text-yellow-500 hover:bg-gray-800' : 'text-gray-400 hover:text-yellow-500 hover:bg-gray-800'}`}
@@ -472,13 +514,17 @@ export default function DrivePage() {
                 </div>
               </div>
               
-              <h4 className="font-medium text-gray-200 truncate mb-1" title={file.original_name}>
-                {file.original_name}
-              </h4>
-              <div className="flex items-center justify-between text-xs text-gray-500 mt-auto pt-4">
-                <span>{formatBytes(file.size)}</span>
-                <span>{file.created_at ? formatRelative(file.created_at) : 'Unknown date'}</span>
-              </div>
+              {viewMode === 'grid' && (
+                <>
+                  <h4 className="font-medium text-gray-200 truncate mb-1" title={file.original_name}>
+                    {file.original_name}
+                  </h4>
+                  <div className="flex items-center justify-between text-xs text-gray-500 mt-auto pt-4">
+                    <span>{formatBytes(file.size)}</span>
+                    <span>{file.created_at ? formatRelative(file.created_at) : 'Unknown date'}</span>
+                  </div>
+                </>
+              )}
             </motion.div>
           ))}
           </AnimatePresence>

@@ -88,6 +88,16 @@ async def audit_worker():
                 )
                 session.add(log)
                 await session.commit()
+                
+                # Push real-time notification via Redis Pub/Sub
+                if redis_client and user_id:
+                    msg_payload = {
+                        "type": "activity",
+                        "action": event,
+                        "resource_name": data.get("filename") or data.get("folder_name") or "",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    await redis_client.publish(f"notifications:{user_id}", json.dumps(msg_payload))
     except Exception as e:
         pass
     finally:

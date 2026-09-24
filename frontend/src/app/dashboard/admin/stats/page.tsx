@@ -10,6 +10,7 @@ import { motion } from 'framer-motion';
 export default function AdminStatsPage() {
   const [stats, setStats] = useState<any>(null);
   const [metaStats, setMetaStats] = useState<any>(null);
+  const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -20,12 +21,14 @@ export default function AdminStatsPage() {
   const fetchStats = async () => {
     try {
       setLoading(true);
-      const [authData, metaData] = await Promise.all([
+      const [authData, metaData, usersData] = await Promise.all([
         adminApi.getStats(),
-        adminApi.getMetadataStats()
+        adminApi.getMetadataStats(),
+        adminApi.getUsers()
       ]);
       setStats(authData);
       setMetaStats(metaData);
+      setUsers(usersData as any[]);
     } catch (err: any) {
       setError(err.message || 'Failed to load stats');
     } finally {
@@ -76,6 +79,14 @@ export default function AdminStatsPage() {
     files: item.count,
     sizeMB: Math.round(item.size / (1024 * 1024))
   })) || [];
+
+  const topUsersData = [...users]
+    .sort((a, b) => b.storage_used - a.storage_used)
+    .slice(0, 5)
+    .map(u => ({
+      username: u.username,
+      storageMB: Math.round(u.storage_used / (1024 * 1024))
+    }));
 
   return (
     <div className="h-full flex flex-col overflow-y-auto custom-scrollbar p-6 space-y-6">
@@ -214,13 +225,23 @@ export default function AdminStatsPage() {
           </div>
         </motion.div>
         
-        {/* Placeholder for User stats or future charts */}
-        <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.8 }} className="bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col items-center justify-center text-center">
-          <div className="w-20 h-20 bg-gray-800 rounded-full flex items-center justify-center text-gray-500 mb-4">
-            <PieChartIcon size={32} />
+        {/* Top Users Bar Chart */}
+        <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.8 }} className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+          <h3 className="text-lg font-semibold text-white mb-6">Top Users by Storage</h3>
+          <div className="h-[250px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={topUsersData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
+                <XAxis type="number" stroke="#4b5563" fontSize={12} tickLine={false} axisLine={false} />
+                <YAxis dataKey="username" type="category" stroke="#4b5563" fontSize={12} tickLine={false} axisLine={false} width={80} />
+                <RechartsTooltip 
+                  contentStyle={{ backgroundColor: '#111827', borderColor: '#374151', borderRadius: '0.5rem', color: '#fff' }}
+                  cursor={{ fill: '#374151', opacity: 0.4 }}
+                />
+                <Bar dataKey="storageMB" fill="#f59e0b" radius={[0, 4, 4, 0]} name="Storage (MB)" />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
-          <h3 className="text-xl font-medium text-gray-200 mb-2">More Analytics Coming Soon</h3>
-          <p className="text-gray-500 max-w-xs mx-auto text-sm">Future updates will include User Quota distribution, Storage prediction, and Audit Log summaries.</p>
         </motion.div>
       </div>
     </div>

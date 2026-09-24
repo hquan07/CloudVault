@@ -4,15 +4,40 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity } from 'lucide-react';
+import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, Bell } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
+import { AnimatePresence, motion } from 'framer-motion';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [showSettings, setShowSettings] = useState(false);
+  const [toast, setToast] = useState<{message: string, id: number} | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      const token = localStorage.getItem('token');
+      if (token) {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/v1/metadata/ws/notifications?token=${token}`);
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const actionText = data.action === 'UPLOAD_FILE' ? 'uploaded' : data.action === 'CREATE_FOLDER' ? 'created' : data.action;
+            setToast({
+              id: Date.now(),
+              message: `You just ${actionText.toLowerCase()}: ${data.resource_name}`,
+            });
+            setTimeout(() => setToast(null), 4000);
+          } catch (e) {}
+        };
+        return () => ws.close();
+      }
+    }
+  }, [user]);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -157,6 +182,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </div>
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            key={toast.id}
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className="fixed bottom-6 right-6 z-50 bg-gray-900 border border-gray-700 shadow-2xl rounded-xl p-4 flex items-center space-x-3 max-w-sm"
+          >
+            <div className="w-10 h-10 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400 flex-shrink-0">
+              <Bell size={20} />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-white">Activity Alert</h4>
+              <p className="text-xs text-gray-400 mt-0.5 truncate">{toast.message}</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
