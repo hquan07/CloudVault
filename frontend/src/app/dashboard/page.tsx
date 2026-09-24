@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users } from 'lucide-react';
+import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
@@ -32,6 +33,29 @@ export interface FolderItem {
   created_at: string;
 }
 
+const FileIconDisplay = ({ mimeType, size = 24 }: { mimeType: string, size?: number }) => {
+  const iconType = getFileIcon(mimeType);
+  switch (iconType) {
+    case 'image': return <ImageIcon size={size} className="text-blue-400" />;
+    case 'video': return <Video size={size} className="text-purple-400" />;
+    case 'audio': return <Music size={size} className="text-yellow-400" />;
+    case 'pdf': return <FileText size={size} className="text-red-400" />;
+    case 'archive': return <FileArchive size={size} className="text-orange-400" />;
+    default: return <FileIcon size={size} className="text-cyan-400" />;
+  }
+};
+
+const SkeletonCard = () => (
+  <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 animate-pulse flex flex-col h-full">
+    <div className="w-12 h-12 rounded-xl bg-gray-800 mb-4"></div>
+    <div className="h-4 bg-gray-800 rounded w-3/4 mb-2"></div>
+    <div className="flex justify-between mt-auto">
+      <div className="h-3 bg-gray-800 rounded w-1/3"></div>
+      <div className="h-3 bg-gray-800 rounded w-1/4"></div>
+    </div>
+  </div>
+);
+
 export default function DrivePage() {
   const { refreshUser } = useAuth();
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -50,6 +74,60 @@ export default function DrivePage() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem | FolderItem; type: 'file' | 'folder' } | null>(null);
+
+  const handleContextMenu = (e: React.MouseEvent, item: FileItem | FolderItem, type: 'file' | 'folder') => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, item, type });
+  };
+
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, []);
+
+  useEffect(() => {
+    let dragCounter = 0;
+    const handleDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter++;
+      if (e.dataTransfer?.items && e.dataTransfer.items.length > 0) {
+        setIsDragActive(true);
+      }
+    };
+    const handleDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter === 0) {
+        setIsDragActive(false);
+      }
+    };
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter = 0;
+      setIsDragActive(false);
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        processFiles(Array.from(e.dataTransfer.files));
+      }
+    };
+
+    window.addEventListener('dragenter', handleDragEnter);
+    window.addEventListener('dragleave', handleDragLeave);
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+
+    return () => {
+      window.removeEventListener('dragenter', handleDragEnter);
+      window.removeEventListener('dragleave', handleDragLeave);
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, [currentFolderId]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -293,7 +371,9 @@ export default function DrivePage() {
       )}
 
       {loading ? (
-        <div className="p-12 text-center text-gray-500">Loading your files...</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {[...Array(8)].map((_, i) => <SkeletonCard key={i} />)}
+        </div>
       ) : files.length === 0 && folders.length === 0 ? (
         <div className="text-center py-24 px-8 border-2 border-dashed border-gray-800 rounded-2xl bg-gray-900/30">
           <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-400">
@@ -303,12 +383,18 @@ export default function DrivePage() {
           <p className="text-gray-500 max-w-sm mx-auto mb-6">Drag and drop files or folders here, or use the New button.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <motion.div layout className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <AnimatePresence>
           {folders.map(folder => (
-            <div 
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              layout
               key={folder.id} 
               className="group bg-gray-900 border border-gray-700 rounded-2xl p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4"
               onClick={() => handleNavigate(folder)}
+              onContextMenu={(e) => handleContextMenu(e, folder, 'folder')}
             >
               <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-yellow-500 shrink-0">
                 <FolderOpen size={24} className="fill-current opacity-80" />
@@ -323,18 +409,23 @@ export default function DrivePage() {
               >
                 <Users size={18} />
               </button>
-            </div>
+            </motion.div>
           ))}
 
           {files.map(file => (
-            <div 
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              layout
               key={file.id} 
-              className="group bg-gray-900 border border-gray-800 rounded-2xl p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer"
+              className="group bg-gray-900 border border-gray-800 rounded-2xl p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex flex-col h-full"
               onClick={() => setPreviewFile(file)}
+              onContextMenu={(e) => handleContextMenu(e, file, 'file')}
             >
               <div className="flex items-start justify-between mb-4">
-                <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-cyan-400">
-                  <FileIcon size={24} />
+                <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center">
+                  <FileIconDisplay mimeType={file.mime_type} />
                 </div>
                 <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button 
@@ -368,13 +459,14 @@ export default function DrivePage() {
               <h4 className="font-medium text-gray-200 truncate mb-1" title={file.original_name}>
                 {file.original_name}
               </h4>
-              <div className="flex items-center justify-between text-xs text-gray-500">
+              <div className="flex items-center justify-between text-xs text-gray-500 mt-auto pt-4">
                 <span>{formatBytes(file.size)}</span>
                 <span>{file.created_at ? formatRelative(file.created_at) : 'Unknown date'}</span>
               </div>
-            </div>
+            </motion.div>
           ))}
-        </div>
+          </AnimatePresence>
+        </motion.div>
       )}
 
       {previewFile && (
@@ -386,6 +478,90 @@ export default function DrivePage() {
       {shareFolder && (
         <ShareFolderModal folder={shareFolder} onClose={() => setShareFolder(null)} />
       )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div 
+          className="fixed z-50 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden min-w-[160px] py-1"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {contextMenu.type === 'file' ? (
+            <>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-cyan-500/20 hover:text-cyan-400 flex items-center gap-2"
+                onClick={() => { setPreviewFile(contextMenu.item as FileItem); setContextMenu(null); }}
+              ><FileIcon size={16} /> Open</button>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-cyan-500/20 hover:text-cyan-400 flex items-center gap-2"
+                onClick={() => { handleDownload(contextMenu.item.id); setContextMenu(null); }}
+              ><Download size={16} /> Download</button>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-cyan-500/20 hover:text-cyan-400 flex items-center gap-2"
+                onClick={() => { setShareFile(contextMenu.item as FileItem); setContextMenu(null); }}
+              ><Share2 size={16} /> Share</button>
+              <div className="h-px bg-gray-800 my-1"></div>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-500/20 flex items-center gap-2"
+                onClick={() => { handleDelete(contextMenu.item.id); setContextMenu(null); }}
+              ><Trash2 size={16} /> Move to Trash</button>
+            </>
+          ) : (
+            <>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-cyan-500/20 hover:text-cyan-400 flex items-center gap-2"
+                onClick={() => { handleNavigate(contextMenu.item as FolderItem); setContextMenu(null); }}
+              ><FolderOpen size={16} /> Open Folder</button>
+              <button 
+                className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-cyan-500/20 hover:text-cyan-400 flex items-center gap-2"
+                onClick={() => { setShareFolder(contextMenu.item as FolderItem); setContextMenu(null); }}
+              ><Users size={16} /> Share Folder</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Drag overlay */}
+      <AnimatePresence>
+        {isDragActive && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-cyan-900/40 backdrop-blur-sm flex flex-col items-center justify-center border-4 border-cyan-400 border-dashed m-4 rounded-3xl pointer-events-none"
+          >
+            <div className="bg-gray-900 rounded-full p-6 mb-4 shadow-2xl">
+              <CloudUpload size={48} className="text-cyan-400 animate-bounce" />
+            </div>
+            <h2 className="text-3xl font-bold text-white drop-shadow-lg">Drop files here to upload</h2>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Upload Progress Panel */}
+      <AnimatePresence>
+        {uploading && (
+          <motion.div 
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 50, scale: 0.9 }}
+            className="fixed bottom-6 right-6 z-40 bg-gray-900 border border-gray-700 shadow-2xl rounded-xl p-4 min-w-[300px]"
+          >
+            <div className="flex items-center gap-3 mb-2">
+              <div className="animate-spin w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full"></div>
+              <h4 className="text-white font-medium">Uploading files...</h4>
+            </div>
+            <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+              <motion.div 
+                className="h-full bg-cyan-400 rounded-full"
+                initial={{ width: "0%" }}
+                animate={{ width: "85%" }} 
+                transition={{ duration: 10, ease: "easeOut" }}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

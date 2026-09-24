@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Activity, UploadCloud, Trash2, Edit2, Share2, FolderPlus } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { formatRelative } from '@/lib/utils';
 import { metaApi } from '@/lib/api';
 
@@ -14,6 +15,21 @@ interface AuditLog {
   created_at: string;
   details: any;
 }
+
+const SkeletonActivity = () => (
+  <div className="relative animate-pulse">
+    <div className="absolute -left-[35px] top-1 w-8 h-8 rounded-full bg-gray-800 border-2 border-gray-700"></div>
+    <div className="p-4 rounded-xl border border-gray-800 bg-gray-900/50">
+      <div className="flex justify-between items-start gap-4">
+        <div className="w-full">
+          <div className="h-4 bg-gray-800 rounded w-1/2 mb-2"></div>
+          <div className="h-3 bg-gray-800 rounded w-1/3"></div>
+        </div>
+        <div className="h-3 bg-gray-800 rounded w-16 shrink-0"></div>
+      </div>
+    </div>
+  </div>
+);
 
 export default function ActivityPage() {
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -66,8 +82,16 @@ export default function ActivityPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="animate-spin w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full"></div>
+      <div className="h-full flex flex-col max-w-4xl mx-auto w-full">
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-3xl font-bold text-white mb-2">Activity Log</h1>
+            <p className="text-gray-400">Track all changes and access to your files and folders</p>
+          </div>
+        </div>
+        <div className="relative pl-6 border-l-2 border-gray-800 space-y-8 pb-12">
+          {[...Array(5)].map((_, i) => <SkeletonActivity key={i} />)}
+        </div>
       </div>
     );
   }
@@ -96,9 +120,17 @@ export default function ActivityPage() {
           <p className="text-gray-500 max-w-sm mx-auto">Your recent actions will appear here.</p>
         </div>
       ) : (
-        <div className="relative pl-6 border-l-2 border-gray-800 space-y-8 pb-12">
+        <motion.div layout className="relative pl-6 border-l-2 border-gray-800 space-y-8 pb-12">
+          <AnimatePresence>
           {logs.map((log) => (
-            <div key={log.id} className="relative">
+            <motion.div 
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              layout
+              key={log.id} 
+              className="relative"
+            >
               <div className="absolute -left-[35px] top-1 w-8 h-8 rounded-full bg-gray-900 border-2 border-gray-800 flex items-center justify-center">
                 {getActionIcon(log.action)}
               </div>
@@ -119,9 +151,10 @@ export default function ActivityPage() {
                   </div>
                 </div>
               </div>
-            </div>
+            </motion.div>
           ))}
-        </div>
+          </AnimatePresence>
+        </motion.div>
       )}
     </div>
   );
