@@ -8,19 +8,30 @@
 
 A **production-grade, self-hosted personal cloud storage platform** built with microservices architecture, event-driven design, and modern DevOps practices. Designed to be a scalable, open-source alternative to Google Drive or Dropbox.
 
-> **Current Status**: ✅ All 6 Phases Complete — 17 Docker containers, 3 microservices, Next.js frontend, Grafana monitoring
+> **Current Status**: ✅ 100% Core Features & UI/UX Polish Complete. Fully functional with Real-time Notifications, Admin Analytics, File Versioning, and a stunning UI.
 
 ---
 
 ## ✨ Key Features
 
+### 🌟 Core Capabilities
 - **Unlimited Object Storage:** Powered by MinIO (S3-compatible) with multi-part chunked upload support for large files.
 - **Enterprise-Grade Security:** JWT-based stateless authentication, bcrypt password hashing, and role-based access.
-- **Advanced File Sharing:** Generate secure public links with optional password protection, download limits, and expiration dates.
-- **Blazing Fast Search:** Elasticsearch integration with edge n-gram analysis for instant full-text search and autocomplete.
+- **Advanced File Sharing:** Generate secure public links with role-based access (View/Edit).
+- **File Versioning:** Automatically tracks versions when files are overwritten, allowing seamless restoration via the UI.
 - **Event-Driven Architecture:** Apache Kafka streams for asynchronous processing (thumbnail generation, indexing, audit logging).
-- **Comprehensive Audit Trail:** Real-time logging of all user and file activities for security and analytics.
-- **Beautiful UI (WIP):** A premium Next.js 14 frontend featuring glassmorphism, dark/light modes, and drag-and-drop capabilities.
+- **Blazing Fast Search:** Elasticsearch integration with edge n-gram analysis for instant full-text search.
+
+### ✨ Premium UI/UX
+- **In-App File Preview:** Instantly preview Images, Videos, and Audio without downloading.
+- **Dynamic Views & Layouts:** Toggle between Grid and List views with beautiful, buttery-smooth Framer Motion crossfade animations.
+- **Smart Drag & Drop:** Dropzone overlays for intuitive recursive folder uploads.
+- **Real-Time Notifications:** WebSockets + Redis Pub/Sub deliver instant toast notifications for background events (e.g., file shared, upload completed).
+- **Rich Visuals:** Empty state illustrations, dynamic file type icons, and dark-mode glassmorphism design.
+
+### 🚀 Admin & Analytics
+- **Admin Statistics Dashboard:** Real-time system monitoring with interactive Recharts (File Type Distribution, Upload Trends, Top Users).
+- **Comprehensive Audit Trail:** Real-time logging of all user and file activities for security and compliance.
 
 ---
 
@@ -33,7 +44,7 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 │       Frontend          │
 │    React / Next.js      │
 └───────────┬─────────────┘
-            │ HTTP/REST
+            │ HTTP/REST/WS
             ▼
 ┌─────────────────────────┐
 │   API Gateway (Nginx)   │
@@ -58,15 +69,14 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 
 | Domain | Technology | Purpose |
 |--------|-----------|---------|
-| **Frontend** | Next.js 14, React, TypeScript | UI and client-side logic |
+| **Frontend** | Next.js 14, React, TypeScript | UI, Client-side logic, Framer Motion animations |
 | **Backend** | Python, FastAPI, SQLAlchemy | High-performance async microservices |
-| **Database** | MySQL 8.0, asyncmy | Relational data persistence |
-| **Cache & Tokens** | Redis 7 | JWT blacklisting, rate limiting |
-| **Object Storage** | MinIO | S3-compatible file/thumbnail storage |
-| **Message Broker**| Apache Kafka, Zookeeper | Async event streaming (`file-events`) |
+| **Database** | MySQL 8.0, asyncmy | Relational data persistence (Users, Metadata, Versions) |
+| **Cache & Pub/Sub**| Redis 7 | JWT blacklisting, WebSockets Real-time Pub/Sub |
+| **Object Storage** | MinIO | S3-compatible file and version storage |
+| **Message Broker**| Apache Kafka, Zookeeper | Async event streaming |
 | **Search Engine** | Elasticsearch 8.11 | Full-text search and autocomplete |
-| **Monitoring** | Prometheus + Grafana | System metrics and visualization |
-| **Routing** | Nginx | Reverse proxy and API gateway |
+| **Routing** | Nginx | Reverse proxy, API gateway, WebSocket proxy |
 
 ---
 
@@ -80,21 +90,20 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 ### 1. Start Infrastructure & Backend
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cloudvault.git
-cd cloudvault
-
-# Copy environment config
-cp .env.example .env
+git clone https://github.com/hquan07/CloudVault.git
+cd CloudVault
 
 # Start all infrastructure and backend services (17 containers)
-docker compose up -d
+docker compose up -d --build
 
 # Verify all services are running
 docker compose ps
 ```
 
-### 2. Start Frontend (Development)
+### 2. Start Frontend
 ```bash
+# The frontend is fully containerized in the docker-compose setup.
+# If you wish to run it locally for development instead:
 cd frontend
 npm install
 npm run dev
@@ -124,17 +133,6 @@ When running locally via Docker Compose, services are mapped to the following po
 
 ---
 
-## 🗺️ Project Roadmap
-
-- [x] **Phase 1: Foundation** — Docker infrastructure (MySQL, Redis, MinIO, Kafka, ES)
-- [x] **Phase 2: Auth Service** — JWT registration, login, token blacklisting via Redis
-- [x] **Phase 3: File Service** — MinIO integration, chunked uploads, presigned URL downloads
-- [x] **Phase 4: Metadata & Workers** — Sharing API, ES search indexer, activity logger, thumbnail generator
-- [x] **Phase 5: Frontend** — Next.js 14 App Router UI, file browser, upload dropzone, glassmorphism design
-- [x] **Phase 6: Polish & Deploy** — Prometheus metrics, Grafana dashboards, CI/CD, demo seed script
-
----
-
 ## 🧪 Testing
 
 The project includes an end-to-end Python test suite that validates the entire backend pipeline.
@@ -143,7 +141,7 @@ The project includes an end-to-end Python test suite that validates the entire b
 # Install test dependencies
 pip install requests
 
-# Run the Phase 4 End-to-End Test Suite
+# Run the End-to-End Test Suite
 python scripts/test_phase4.py
 ```
 
