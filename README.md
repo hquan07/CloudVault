@@ -123,15 +123,15 @@ When running locally via Docker Compose, services are mapped to the following po
 | **Auth Service** | `8001` | User registration & JWT auth | — |
 | **File Service** | `8002` | File upload, download & storage | — |
 | **Metadata Service**| `8003` | Metadata CRUD, sharing & search | — |
-| **MinIO API** | `9000` | S3 API Endpoint | `cloudvault_admin` / `cloudvault_minio_2026` |
-| **MinIO Console** | `9001` | Storage Web UI | `cloudvault_admin` / `cloudvault_minio_2026` |
+| **MinIO API** | `9000` | S3 API Endpoint | — |
+| **MinIO Console** | `9001` | Storage Web UI | — |
 | **Elasticsearch** | `9200` | Search API | — |
 | **Kibana** | `5601` | Search UI | — |
 | **Kafka UI** | `8080` | Kafka Cluster Management | — |
-| **Grafana** | `3001` | Metrics Dashboard | `admin` / `cloudvault_grafana_2026` |
+| **Grafana** | `3001` | Metrics Dashboard | — |
 | **Prometheus** | `9090` | Time-series metrics | — |
 | **Jaeger** | `16686`| Distributed Tracing UI | — |
-| **MySQL** | `3306` | Relational Database | `root` / `cloudvault_mysql_root_2026` |
+| **MySQL** | `3306` | Relational Database | — |
 | **Redis** | `6379` | In-memory Cache | — |
 
 ---
