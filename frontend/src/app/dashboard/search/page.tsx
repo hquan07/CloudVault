@@ -153,14 +153,14 @@ function SearchResults() {
                 {file.original_name}
               </h4>
               
-              {file.highlight && file.highlight.content && (
+              {file.highlight && file.highlight.content && Array.isArray(file.highlight.content) && file.highlight.content.length > 0 && (
                 <div className="text-xs text-gray-400 mb-3 italic overflow-hidden text-ellipsis line-clamp-2" dangerouslySetInnerHTML={{ __html: file.highlight.content[0] }}>
                 </div>
               )}
 
               <div className="flex items-center justify-between text-xs text-gray-500">
-                <span>{formatBytes(file.size)}</span>
-                <span>{formatRelative(file.created_at)}</span>
+                <span>{formatBytes(file.size || 0)}</span>
+                <span>{file.created_at ? formatRelative(file.created_at) : 'Unknown date'}</span>
               </div>
             </div>
           ))}

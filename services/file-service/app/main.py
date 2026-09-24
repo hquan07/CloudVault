@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
         access_key=settings.MINIO_ROOT_USER,
         secret_key=settings.MINIO_ROOT_PASSWORD,
         secure=False,
+        region="us-east-1",
     )
 
     # Kafka

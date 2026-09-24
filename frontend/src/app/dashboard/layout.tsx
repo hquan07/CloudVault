@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield } from 'lucide-react';
+import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
 
@@ -39,7 +39,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   ];
 
   if (user?.role === 'admin') {
+    navItems.push({ name: 'Architecture', path: '/dashboard/architecture', icon: Network });
     navItems.push({ name: 'Admin Panel', path: '/dashboard/admin', icon: Shield });
+    navItems.push({ name: 'Admin Stats', path: '/dashboard/admin/stats', icon: PieChart });
   }
 
   const usagePercent = Math.min(100, (user.storage_used / user.storage_quota) * 100);
@@ -112,12 +114,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 bg-gray-900/50 backdrop-blur-md border-b border-gray-800 flex items-center justify-between px-6 z-10">
-          <div className="flex items-center space-x-4">
+        <header className="h-16 bg-gray-900/50 backdrop-blur-md border-b border-gray-800 flex items-center px-6 z-10 relative">
+          <div className="flex items-center w-1/3">
             <button className="md:hidden p-2 text-gray-400 hover:bg-gray-800 rounded-lg">
               <Menu size={20} />
             </button>
-            <div className="relative w-64 md:w-96 hidden sm:block group">
+          </div>
+
+          <div className="flex-1 flex justify-center">
+            <div className="relative w-full max-w-xl hidden sm:block group">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500 group-focus-within:text-cyan-400 transition-colors">
                 <Search size={16} />
               </div>
@@ -134,7 +139,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
           </div>
           
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center justify-end space-x-4 w-1/3">
             <button 
               onClick={() => setShowSettings(true)}
               className="p-2 text-gray-400 hover:bg-gray-800 hover:text-gray-200 rounded-lg transition-colors"

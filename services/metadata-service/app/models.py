@@ -23,6 +23,7 @@ class User(Base):
     username = Column(String(100), nullable=False, unique=True)
     storage_quota = Column(BigInteger, nullable=False, default=5368709120)
     storage_used = Column(BigInteger, nullable=False, default=0)
+    role = Column(String(50), nullable=False, default="user")
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
