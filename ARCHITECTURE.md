@@ -16,7 +16,7 @@ graph TD
     Web["Next.js App (Web Application)"]
 
     %% Layer 3
-    subgraph Frontend Components
+    subgraph frontend ["Frontend Components"]
         FilePreview["File Preview (UI Component)"]
         ShareUI["Share UI (UI Component)"]
         AuthCtx["Auth State (React Context)"]
@@ -27,7 +27,7 @@ graph TD
     API["API Client (Axios/Fetch)"]
 
     %% Layer 5
-    subgraph Core Microservices (FastAPI)
+    subgraph core ["Core Microservices (FastAPI)"]
         Auth["Auth Service"]
         Files["File Service"]
         Meta["Metadata Service"]
@@ -38,7 +38,7 @@ graph TD
     Redis[("Redis (Cache & Pub/Sub)")]
 
     %% Layer 7
-    subgraph Asynchronous Workers (Python)
+    subgraph workers ["Asynchronous Workers (Python)"]
         AuditW["Audit Logger"]
         ZipW["ZIP Extractor"]
         ThumbW["Thumbnail Gen"]
