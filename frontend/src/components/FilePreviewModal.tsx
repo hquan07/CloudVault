@@ -2,8 +2,11 @@
 
 import { X, Download, AlertCircle, Loader2, FileIcon, History, RotateCcw } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import { fileApi } from '@/lib/api';
 import { formatBytes, formatRelative } from '@/lib/utils';
+
+const ReactPlayer = dynamic(() => import('react-player'), { ssr: false }) as any;
 
 export interface FileItem {
   id: string;
@@ -26,6 +29,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
   const [versions, setVersions] = useState<any[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
+  const [textContent, setTextContent] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchUrl = async () => {
@@ -33,6 +37,16 @@ export function FilePreviewModal({ file, onClose }: Props) {
         const data = await fileApi.download(file.id);
         if (data.download_url) {
           setUrl(data.download_url);
+          // If text file, fetch content to display directly
+          if (file.mime_type?.startsWith('text/') || file.mime_type === 'application/json' || file.mime_type === 'application/xml') {
+            try {
+              const res = await fetch(data.download_url);
+              const text = await res.text();
+              setTextContent(text);
+            } catch (err) {
+              console.error("Failed to fetch text content", err);
+            }
+          }
         } else {
           setError('Could not generate preview URL');
         }
@@ -175,13 +189,41 @@ export function FilePreviewModal({ file, onClose }: Props) {
                 <img src={url!} alt={file.original_name} className="max-w-full max-h-full object-contain rounded-lg" />
               )}
               {isVideo && (
-                <video src={url!} controls autoPlay className="max-w-full max-h-full rounded-lg shadow-lg bg-black" />
+                <div className="w-full h-full flex items-center justify-center rounded-lg shadow-lg bg-black overflow-hidden">
+                  {/* @ts-ignore */}
+                  <ReactPlayer 
+                    url={url!} 
+                    controls 
+                    playing 
+                    width="100%" 
+                    height="100%" 
+                    style={{ maxWidth: '100%', maxHeight: '100%' }}
+                  />
+                </div>
               )}
               {isAudio && (
-                <audio src={url!} controls className="w-full max-w-md" />
+                <div className="w-full max-w-md bg-gray-800 p-6 rounded-2xl shadow-xl flex flex-col items-center">
+                  <div className="w-24 h-24 bg-cyan-900/30 text-cyan-400 rounded-full flex items-center justify-center mb-6">
+                    <FileIcon size={40} />
+                  </div>
+                  <h4 className="text-gray-200 font-medium text-lg mb-4 text-center truncate w-full">{file.original_name}</h4>
+                  {/* @ts-ignore */}
+                  <ReactPlayer 
+                    url={url!} 
+                    controls 
+                    width="100%" 
+                    height="50px" 
+                    config={{ file: { forceAudio: true } }}
+                  />
+                </div>
               )}
-              {(isPdf || isText) && (
+              {isPdf && (
                 <iframe src={url!} className="w-full h-full rounded-lg bg-white" title={file.original_name} />
+              )}
+              {isText && textContent !== null && (
+                <div className="w-full h-full bg-[#1e1e1e] text-[#d4d4d4] p-6 rounded-lg overflow-auto font-mono text-sm shadow-inner text-left whitespace-pre-wrap">
+                  {textContent}
+                </div>
               )}
             </div>
           )}
