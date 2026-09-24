@@ -425,23 +425,15 @@ export default function DrivePage() {
           <p className="text-gray-500 max-w-sm mx-auto mb-6">The cloud is sleeping. Drag and drop files or folders here to wake it up!</p>
         </div>
       ) : (
-        <AnimatePresence mode="wait">
-          <motion.div 
-            key={viewMode}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.15 }}
-            className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "flex flex-col gap-2"}
-          >
-            <AnimatePresence>
-            {folders.map(folder => (
+        <motion.div className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "flex flex-col gap-2"}>
+          <AnimatePresence>
+          {folders.map(folder => (
             <motion.div 
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
               layout
-              key={folder.id} 
+              key={`${viewMode}-folder-${folder.id}`} 
               className={`group bg-gray-900 border border-gray-700 p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4 ${viewMode === 'grid' ? 'rounded-2xl' : 'rounded-xl'}`}
               onClick={() => handleNavigate(folder)}
               onContextMenu={(e) => handleContextMenu(e, folder, 'folder')}
@@ -471,7 +463,7 @@ export default function DrivePage() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9 }}
               layout
-              key={file.id} 
+              key={`${viewMode}-file-${file.id}`} 
               className={`group bg-gray-900 border border-gray-800 p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
               onClick={() => setPreviewFile(file)}
               onContextMenu={(e) => handleContextMenu(e, file, 'file')}
@@ -537,7 +529,6 @@ export default function DrivePage() {
           ))}
           </AnimatePresence>
         </motion.div>
-        </AnimatePresence>
       )}
 
       {previewFile && (
