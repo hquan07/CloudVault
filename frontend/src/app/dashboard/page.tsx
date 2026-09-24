@@ -65,6 +65,7 @@ export default function DrivePage() {
   
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'success'>('idle');
   const [error, setError] = useState('');
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [shareFile, setShareFile] = useState<FileItem | null>(null);
@@ -79,13 +80,22 @@ export default function DrivePage() {
 
   const handleContextMenu = (e: React.MouseEvent, item: FileItem | FolderItem, type: 'file' | 'folder') => {
     e.preventDefault();
+    e.stopPropagation();
+    console.log('Context menu triggered!', e.clientX, e.clientY, type, item);
     setContextMenu({ x: e.clientX, y: e.clientY, item, type });
   };
 
   useEffect(() => {
     const handleClick = () => setContextMenu(null);
+    const handleScroll = () => setContextMenu(null);
     window.addEventListener('click', handleClick);
-    return () => window.removeEventListener('click', handleClick);
+    window.addEventListener('contextmenu', handleClick);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      window.removeEventListener('click', handleClick);
+      window.removeEventListener('contextmenu', handleClick);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -163,6 +173,7 @@ export default function DrivePage() {
     if (filesArray.length === 0) return;
     
     setUploading(true);
+    setUploadStatus('uploading');
     setError('');
     
     try {
@@ -172,10 +183,15 @@ export default function DrivePage() {
       }
       await loadFiles();
       refreshUser();
+      setUploadStatus('success');
+      setTimeout(() => {
+        setUploading(false);
+        setUploadStatus('idle');
+      }, 3000);
     } catch (err: any) {
       setError(err.message || 'Upload failed');
-    } finally {
       setUploading(false);
+      setUploadStatus('idle');
     }
   };
 
@@ -482,8 +498,8 @@ export default function DrivePage() {
       {/* Context Menu */}
       {contextMenu && (
         <div 
-          className="fixed z-50 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden min-w-[160px] py-1"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
+          className="fixed z-[1000] bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden min-w-[160px] py-1"
+          style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
           onClick={(e) => e.stopPropagation()}
         >
           {contextMenu.type === 'file' ? (
@@ -548,15 +564,24 @@ export default function DrivePage() {
             className="fixed bottom-6 right-6 z-40 bg-gray-900 border border-gray-700 shadow-2xl rounded-xl p-4 min-w-[300px]"
           >
             <div className="flex items-center gap-3 mb-2">
-              <div className="animate-spin w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full"></div>
-              <h4 className="text-white font-medium">Uploading files...</h4>
+              {uploadStatus === 'uploading' ? (
+                <>
+                  <div className="animate-spin w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full"></div>
+                  <h4 className="text-white font-medium">Uploading files...</h4>
+                </>
+              ) : (
+                <>
+                  <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px]">✓</div>
+                  <h4 className="text-green-400 font-medium">Upload complete!</h4>
+                </>
+              )}
             </div>
             <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
               <motion.div 
-                className="h-full bg-cyan-400 rounded-full"
+                className={`h-full rounded-full ${uploadStatus === 'success' ? 'bg-green-500' : 'bg-cyan-400'}`}
                 initial={{ width: "0%" }}
-                animate={{ width: "85%" }} 
-                transition={{ duration: 10, ease: "easeOut" }}
+                animate={{ width: uploadStatus === 'success' ? "100%" : "85%" }} 
+                transition={{ duration: uploadStatus === 'success' ? 0.3 : 10, ease: "easeOut" }}
               />
             </div>
           </motion.div>
