@@ -263,6 +263,7 @@ async def upload_file(
         existing_file.mime_type = file.content_type or "application/octet-stream"
         db_file = existing_file
         await db.flush()
+        await db.refresh(db_file)
     else:
         db_file = File(
             filename=f"{file_id}{f'.{ext}' if ext else ''}",
