@@ -117,6 +117,13 @@ export const authApi = {
 
 /* ── File API ── */
 export const fileApi = {
+  shareFolder: (folderId: string, email: string, role: string) =>
+    request(`${FILE_BASE}/folders/${folderId}/share`, {
+      method: 'POST',
+      body: JSON.stringify({ user_email: email, role }),
+    }),
+  getSharedFolders: () =>
+    request(`${FILE_BASE}/folders/shared-with-me`),
   upload: async (file: File | Blob, folderId?: string, relativePath?: string, isEncrypted?: boolean) => {
     const formData = new FormData();
     // Support Blob (encrypted) by passing a name

@@ -36,7 +36,7 @@ import redis.asyncio as aioredis
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin
-from app.models import User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily
+from app.models import User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily, FolderPermission
 
 # ── Elasticsearch & Redis clients ──
 es_client: AsyncElasticsearch | None = None
@@ -49,6 +49,49 @@ minio_public_client = Minio(
     region="us-east-1",
 )
 
+
+
+from aiokafka import AIOKafkaConsumer
+from app.database import async_session
+import json
+import asyncio
+
+audit_consumer_task = None
+
+async def audit_worker():
+    consumer = AIOKafkaConsumer(
+        settings.KAFKA_TOPIC_FILE_EVENTS,
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        group_id="audit-logger",
+        auto_offset_reset="latest",
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+    )
+    await consumer.start()
+    try:
+        async for msg in consumer:
+            data = msg.value
+            event = data.get("event")
+            user_id = data.get("user_id") or data.get("shared_by")
+            file_id = data.get("file_id") or data.get("folder_id")
+            
+            if not event or not user_id:
+                continue
+                
+            async with async_session() as session:
+                log = AuditLog(
+                    user_id=user_id,
+                    action=event,
+                    resource_type="FILE" if "file_id" in data else "FOLDER",
+                    resource_id=file_id or "",
+                    resource_name=data.get("filename") or data.get("folder_name") or "",
+                    details=data
+                )
+                session.add(log)
+                await session.commit()
+    except Exception as e:
+        pass
+    finally:
+        await consumer.stop()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -111,11 +154,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass  # ES may not be ready yet; search-indexer will handle it
 
+    global audit_consumer_task
+    audit_consumer_task = asyncio.create_task(audit_worker())
     yield
     if es_client:
         await es_client.close()
     if redis_client:
         await redis_client.close()
+    if audit_consumer_task:
+        audit_consumer_task.cancel()
 
 
 # ── FastAPI App ──

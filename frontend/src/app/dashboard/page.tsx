@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud } from 'lucide-react';
+import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users } from 'lucide-react';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 import { ShareModal } from '@/components/ShareModal';
+import { ShareFolderModal } from '@/components/ShareFolderModal';
 
 export interface FileItem {
   id: string;
@@ -43,6 +44,7 @@ export default function DrivePage() {
   const [error, setError] = useState('');
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [shareFile, setShareFile] = useState<FileItem | null>(null);
+  const [shareFolder, setShareFolder] = useState<FolderItem | null>(null);
 
   // Drag & Drop / Dropdown states
   const [isDragActive, setIsDragActive] = useState(false);
@@ -314,6 +316,13 @@ export default function DrivePage() {
               <h4 className="font-medium text-gray-200 truncate flex-1" title={folder.name}>
                 {folder.name}
               </h4>
+              <button 
+                onClick={(e) => { e.stopPropagation(); setShareFolder(folder); }}
+                className="p-2 text-gray-500 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                title="Share folder"
+              >
+                <Users size={18} />
+              </button>
             </div>
           ))}
 
@@ -373,6 +382,9 @@ export default function DrivePage() {
       )}
       {shareFile && (
         <ShareModal file={shareFile} onClose={() => setShareFile(null)} />
+      )}
+      {shareFolder && (
+        <ShareFolderModal folder={shareFolder} onClose={() => setShareFolder(null)} />
       )}
     </div>
   );

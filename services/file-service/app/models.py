@@ -39,6 +39,19 @@ class Folder(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FolderPermission(Base):
+    __tablename__ = "folder_permissions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    folder_id = Column(String(36), ForeignKey("folders.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(20), nullable=False) # 'viewer', 'editor', 'manager'
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    folder = relationship("Folder", back_populates="permissions")
+
+Folder.permissions = relationship("FolderPermission", back_populates="folder", cascade="all, delete-orphan")
+
 class File(Base):
     __tablename__ = "files"
 

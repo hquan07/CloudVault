@@ -309,18 +309,59 @@ async def upload_file(
     return _file_to_dict(db_file)
 
 
+
+async def verify_file_access(db: AsyncSession, file_id: str, user_id: str, required_role: str = "viewer") -> File:
+    # 1. Fetch file and its folder
+    f_query = select(File, Folder).outerjoin(Folder, File.folder_id == Folder.id).where(File.id == file_id, File.is_deleted == False)
+    result = await db.execute(f_query)
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    file_obj, folder_obj = row
+
+    # 2. If owner, always allow
+    if file_obj.user_id == user_id:
+        return file_obj
+
+    # 3. If file is in a folder, check inherited permissions
+    if folder_obj:
+        path_parts = [p for p in folder_obj.path.split('/') if p]
+        folder_ids_to_check = path_parts + [folder_obj.id]
+        
+        perm_query = select(FolderPermission).where(
+            FolderPermission.folder_id.in_(folder_ids_to_check),
+            FolderPermission.user_id == user_id
+        )
+        perm_res = await db.execute(perm_query)
+        perms = perm_res.scalars().all()
+        
+        if perms:
+            # Check if any of the permissions satisfy the required role
+            has_access = False
+            for p in perms:
+                if required_role == "viewer":
+                    has_access = True # Any role can view
+                    break
+                elif required_role == "editor" and p.role in ["editor", "manager"]:
+                    has_access = True
+                    break
+                elif required_role == "manager" and p.role == "manager":
+                    has_access = True
+                    break
+            
+            if has_access:
+                return file_obj
+
+    raise HTTPException(status_code=403, detail="You do not have permission to access this file")
+
 @app.get("/api/v1/files/{file_id}/download")
 async def download_file(
     file_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(File).where(File.id == file_id, File.user_id == user.id)
-    )
-    f = result.scalar_one_or_none()
-    if not f:
-        raise HTTPException(status_code=404, detail="File not found")
+    f = await verify_file_access(db, file_id, user.id, "viewer")
 
     # Generate presigned URL (valid for 1 hour)
     from datetime import timedelta
@@ -486,12 +527,7 @@ async def permanent_delete(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(File).where(File.id == file_id, File.user_id == user.id)
-    )
-    f = result.scalar_one_or_none()
-    if not f:
-        raise HTTPException(status_code=404, detail="File not found")
+    f = await verify_file_access(db, file_id, user.id, "viewer")
 
     # Delete from MinIO
     try:
@@ -692,6 +728,92 @@ async def list_folders(
         query = query.where(Folder.parent_id == None)
 
     query = query.order_by(Folder.name.asc())
+    result = await db.execute(query)
+    folders = result.scalars().all()
+
+    return {
+        "folders": [
+            {
+                "id": f.id,
+                "name": f.name,
+                "parent_id": f.parent_id,
+                "path": f.path,
+                "depth": f.depth,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in folders
+        ]
+    }
+
+from app.models import FolderPermission
+from pydantic import BaseModel
+
+class ShareFolderRequest(BaseModel):
+    user_email: str
+    role: str # 'viewer', 'editor', 'manager'
+
+@app.post("/api/v1/folders/{folder_id}/share")
+async def share_folder(
+    folder_id: str,
+    req: ShareFolderRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Verify folder ownership
+    query = select(Folder).where(Folder.id == folder_id, Folder.user_id == user.id)
+    folder = (await db.execute(query)).scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found or you don't have permission")
+
+    # Find user by email
+    user_query = select(User).where(User.email == req.user_email)
+    target_user = (await db.execute(user_query)).scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target_user.id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot share with yourself")
+
+    # Check if permission already exists
+    perm_query = select(FolderPermission).where(
+        FolderPermission.folder_id == folder_id,
+        FolderPermission.user_id == target_user.id
+    )
+    perm = (await db.execute(perm_query)).scalar_one_or_none()
+
+    if perm:
+        perm.role = req.role
+    else:
+        perm = FolderPermission(
+            folder_id=folder_id,
+            user_id=target_user.id,
+            role=req.role
+        )
+        db.add(perm)
+
+    await db.commit()
+
+    # Emit notification event
+    await _emit_event("FOLDER_SHARED", {
+        "folder_id": folder_id,
+        "folder_name": folder.name,
+        "shared_by": user.id,
+        "shared_with": target_user.id,
+        "role": req.role
+    })
+
+    return {"message": "Folder shared successfully"}
+
+@app.get("/api/v1/folders/shared-with-me")
+async def list_shared_folders(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Get all root shared folders
+    query = select(Folder).join(FolderPermission, Folder.id == FolderPermission.folder_id).where(
+        FolderPermission.user_id == user.id,
+        Folder.is_deleted == False
+    )
     result = await db.execute(query)
     folders = result.scalars().all()
 
