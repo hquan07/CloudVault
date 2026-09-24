@@ -8,7 +8,7 @@
 
 A **production-grade, self-hosted personal cloud storage platform** built with microservices architecture, event-driven design, and modern DevOps practices. Designed to be a scalable, open-source alternative to Google Drive or Dropbox.
 
-> **Current Status**: ✅ 100% Core Features & UI/UX Polish Complete. Fully functional with Real-time Notifications, Admin Analytics, File Versioning, and a stunning UI.
+> **Current Status**: ✅ 100% Core Features & UI/UX Polish Complete. Fully functional with Real-time Notifications, Admin Analytics, File Versioning, and a stunning UI. 22 Docker containers running in harmony!
 
 ---
 
@@ -59,8 +59,8 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
         ▼       ▼       ▼    │ Thumbnail Worker │
     ┌──────┐┌──────┐┌──────┐ │ Search Indexer   │ ← Kafka Consumers
     │MySQL ││MinIO ││Kafka │◄┤ Audit Logger     │
-    │Redis ││      ││  ES  │ └──────────────────┘
-    └──────┘└──────┘└──────┘
+    │Redis ││      ││  ES  │ │ Zip Extractor    │
+    └──────┘└──────┘└──────┘ └──────────────────┘
 ```
 
 ---
@@ -74,8 +74,9 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 | **Database** | MySQL 8.0, asyncmy | Relational data persistence (Users, Metadata, Versions) |
 | **Cache & Pub/Sub**| Redis 7 | JWT blacklisting, WebSockets Real-time Pub/Sub |
 | **Object Storage** | MinIO | S3-compatible file and version storage |
-| **Message Broker**| Apache Kafka, Zookeeper | Async event streaming |
-| **Search Engine** | Elasticsearch 8.11 | Full-text search and autocomplete |
+| **Message Broker**| Apache Kafka, Zookeeper | Async event streaming (`file-events`, `user-events`) |
+| **Search Engine** | Elasticsearch 8.11, Kibana | Full-text search and management |
+| **Monitoring** | Prometheus, Grafana, Jaeger | Metrics, visualization, and distributed tracing |
 | **Routing** | Nginx | Reverse proxy, API gateway, WebSocket proxy |
 
 ---
@@ -93,7 +94,7 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 git clone https://github.com/hquan07/CloudVault.git
 cd CloudVault
 
-# Start all infrastructure and backend services (17 containers)
+# Start all infrastructure and backend services (22 containers)
 docker compose up -d --build
 
 # Verify all services are running
@@ -125,9 +126,11 @@ When running locally via Docker Compose, services are mapped to the following po
 | **MinIO API** | `9000` | S3 API Endpoint | `cloudvault_admin` / `cloudvault_minio_2026` |
 | **MinIO Console** | `9001` | Storage Web UI | `cloudvault_admin` / `cloudvault_minio_2026` |
 | **Elasticsearch** | `9200` | Search API | — |
+| **Kibana** | `5601` | Search UI | — |
 | **Kafka UI** | `8080` | Kafka Cluster Management | — |
 | **Grafana** | `3001` | Metrics Dashboard | `admin` / `cloudvault_grafana_2026` |
 | **Prometheus** | `9090` | Time-series metrics | — |
+| **Jaeger** | `16686`| Distributed Tracing UI | — |
 | **MySQL** | `3306` | Relational Database | `root` / `cloudvault_mysql_root_2026` |
 | **Redis** | `6379` | In-memory Cache | — |
 
