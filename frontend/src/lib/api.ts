@@ -132,6 +132,14 @@ export const fileApi = {
     return request<{ download_url: string }>(`${FILE_BASE}/files/${fileId}/download`);
   },
 
+  getVersions: (fileId: string) =>
+    request<any[]>(`${FILE_BASE}/files/${fileId}/versions`),
+
+  restoreVersion: (fileId: string, versionNumber: number) =>
+    request(`${FILE_BASE}/files/${fileId}/versions/restore`, {
+      method: 'POST', body: JSON.stringify({ version_number: versionNumber }),
+    }),
+
   deleteFile: (fileId: string) =>
     request(`${FILE_BASE}/files/${fileId}`, { method: 'DELETE' }),
 

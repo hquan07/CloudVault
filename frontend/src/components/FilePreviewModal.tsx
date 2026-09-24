@@ -1,9 +1,9 @@
 'use client';
 
-import { X, Download, AlertCircle, Loader2, FileIcon } from 'lucide-react';
+import { X, Download, AlertCircle, Loader2, FileIcon, History, RotateCcw } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { fileApi } from '@/lib/api';
-import { formatBytes } from '@/lib/utils';
+import { formatBytes, formatRelative } from '@/lib/utils';
 
 export interface FileItem {
   id: string;
@@ -22,6 +22,10 @@ export function FilePreviewModal({ file, onClose }: Props) {
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showVersions, setShowVersions] = useState(false);
+  const [versions, setVersions] = useState<any[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
 
   useEffect(() => {
     const fetchUrl = async () => {
@@ -40,6 +44,39 @@ export function FilePreviewModal({ file, onClose }: Props) {
     };
     fetchUrl();
   }, [file.id]);
+
+  useEffect(() => {
+    if (showVersions && versions.length === 0) {
+      const fetchVersions = async () => {
+        setLoadingVersions(true);
+        try {
+          const data = await fileApi.getVersions(file.id);
+          setVersions(data || []);
+        } catch (err) {
+          console.error("Failed to fetch versions", err);
+        } finally {
+          setLoadingVersions(false);
+        }
+      };
+      fetchVersions();
+    }
+  }, [showVersions, file.id, versions.length]);
+
+  const handleRestore = async (versionNumber: number) => {
+    setRestoringVersion(versionNumber);
+    try {
+      await fileApi.restoreVersion(file.id, versionNumber);
+      // After restore, close modal so dashboard refreshes or we could trigger a refresh event
+      onClose();
+      // Alternatively, just refresh the page to see changes
+      window.location.reload();
+    } catch (err) {
+      console.error("Failed to restore", err);
+      alert("Failed to restore version");
+    } finally {
+      setRestoringVersion(null);
+    }
+  };
 
   const type = (file.mime_type || '').toLowerCase();
   const isImage = type.startsWith('image/');
@@ -74,6 +111,13 @@ export function FilePreviewModal({ file, onClose }: Props) {
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-4">
+            <button 
+              onClick={() => setShowVersions(!showVersions)}
+              className={`p-2 rounded-lg transition-colors ${showVersions ? 'bg-cyan-900/50 text-cyan-400' : 'text-gray-400 hover:text-cyan-400 hover:bg-gray-800'}`}
+              title="Version History"
+            >
+              <History size={20} />
+            </button>
             {url && (
               <a 
                 href={url} 
@@ -93,8 +137,10 @@ export function FilePreviewModal({ file, onClose }: Props) {
           </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-hidden bg-black/40 flex items-center justify-center p-4 relative">
+        {/* Content & Sidebar Wrapper */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Main Content */}
+          <div className="flex-1 overflow-hidden bg-black/40 flex items-center justify-center p-4 relative">
           {loading ? (
             <div className="flex flex-col items-center text-gray-500">
               <Loader2 className="animate-spin mb-3 text-cyan-500" size={32} />
@@ -140,7 +186,58 @@ export function FilePreviewModal({ file, onClose }: Props) {
             </div>
           )}
         </div>
+
+        {/* Versions Sidebar */}
+        {showVersions && (
+          <div className="w-80 border-l border-gray-800 bg-gray-900 flex flex-col animate-in slide-in-from-right-8 duration-200">
+            <div className="p-4 border-b border-gray-800">
+              <h4 className="font-medium text-gray-200">Version History</h4>
+              <p className="text-xs text-gray-500 mt-1">Restore previous versions of this file.</p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {loadingVersions ? (
+                <div className="flex justify-center p-4">
+                  <Loader2 className="animate-spin text-cyan-500" size={24} />
+                </div>
+              ) : versions.length === 0 ? (
+                <div className="text-center text-sm text-gray-500 mt-4">
+                  No version history found.
+                </div>
+              ) : (
+                versions.map((v, i) => (
+                  <div key={v.id} className="bg-gray-800/50 border border-gray-700/50 p-3 rounded-xl">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <span className="text-sm font-medium text-gray-200">Version {v.version_number}</span>
+                        {i === 0 && <span className="ml-2 text-[10px] uppercase tracking-wider bg-cyan-500/20 text-cyan-400 px-1.5 py-0.5 rounded">Current</span>}
+                      </div>
+                      <span className="text-xs text-gray-500">{formatBytes(v.size)}</span>
+                    </div>
+                    <div className="text-xs text-gray-400 mb-3">
+                      {formatRelative(v.created_at)}
+                    </div>
+                    {i !== 0 && (
+                      <button
+                        onClick={() => handleRestore(v.version_number)}
+                        disabled={restoringVersion === v.version_number}
+                        className="w-full flex items-center justify-center gap-2 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 text-xs font-medium rounded-lg transition-colors"
+                      >
+                        {restoringVersion === v.version_number ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <RotateCcw size={14} />
+                        )}
+                        Restore this version
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </div>
+    </div>
     </div>
   );
 }

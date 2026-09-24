@@ -232,26 +232,54 @@ async def upload_file(
             parent_id = folder.id
         actual_folder_id = parent_id
 
-    # Create file record
-    db_file = File(
-        filename=f"{file_id}{f'.{ext}' if ext else ''}",
-        original_name=file.filename or "unnamed",
-        mime_type=file.content_type or "application/octet-stream",
-        size=file_size,
-        folder_id=actual_folder_id,
-        user_id=user.id,
-        minio_bucket=settings.MINIO_BUCKET_FILES,
-        minio_key=minio_key,
-        checksum_sha256=checksum,
-    )
-    db.add(db_file)
-    await db.flush()
-    await db.refresh(db_file)
+    # Check if file with same original_name exists
+    original_name = file.filename or "unnamed"
+    if actual_folder_id:
+        existing_file_query = select(File).where(
+            File.user_id == user.id,
+            File.folder_id == actual_folder_id,
+            File.original_name == original_name,
+            File.is_deleted == False,
+        )
+    else:
+        existing_file_query = select(File).where(
+            File.user_id == user.id,
+            File.folder_id == None,
+            File.original_name == original_name,
+            File.is_deleted == False,
+        )
+    
+    existing = await db.execute(existing_file_query)
+    existing_file = existing.scalar_one_or_none()
 
-    # Create initial version
+    if existing_file:
+        existing_file.current_version += 1
+        existing_file.minio_key = minio_key
+        existing_file.size = file_size
+        existing_file.checksum_sha256 = checksum
+        existing_file.mime_type = file.content_type or "application/octet-stream"
+        db_file = existing_file
+        await db.flush()
+    else:
+        db_file = File(
+            filename=f"{file_id}{f'.{ext}' if ext else ''}",
+            original_name=original_name,
+            mime_type=file.content_type or "application/octet-stream",
+            size=file_size,
+            folder_id=actual_folder_id,
+            user_id=user.id,
+            minio_bucket=settings.MINIO_BUCKET_FILES,
+            minio_key=minio_key,
+            checksum_sha256=checksum,
+        )
+        db.add(db_file)
+        await db.flush()
+        await db.refresh(db_file)
+
+    # Create new version record
     version = FileVersion(
         file_id=db_file.id,
-        version_number=1,
+        version_number=db_file.current_version,
         minio_key=minio_key,
         size=file_size,
         checksum_sha256=checksum,
@@ -259,7 +287,7 @@ async def upload_file(
     )
     db.add(version)
 
-    # Update storage used
+    # Update storage used (accumulate size of all versions)
     user.storage_used += file_size
     await db.commit()
 
@@ -314,6 +342,95 @@ async def download_file(
     })
 
     return {"download_url": url}
+
+
+# ══════════════════════════════════════════════
+# VERSIONS
+# ══════════════════════════════════════════════
+
+@app.get("/api/v1/files/{file_id}/versions")
+async def get_file_versions(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Verify file exists and belongs to user
+    f_result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == False)
+    )
+    f = f_result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    v_result = await db.execute(
+        select(FileVersion).where(FileVersion.file_id == file_id).order_by(FileVersion.version_number.desc())
+    )
+    versions = v_result.scalars().all()
+    
+    return [
+        {
+            "id": v.id,
+            "version_number": v.version_number,
+            "size": v.size,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "uploaded_by": v.uploaded_by,
+        }
+        for v in versions
+    ]
+
+
+@app.post("/api/v1/files/{file_id}/versions/restore")
+async def restore_file_version(
+    file_id: str,
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    version_number = body.get("version_number")
+    if not version_number:
+        raise HTTPException(status_code=400, detail="version_number is required")
+
+    # Verify file exists and belongs to user
+    f_result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == False)
+    )
+    f = f_result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Get target version
+    v_result = await db.execute(
+        select(FileVersion).where(
+            FileVersion.file_id == file_id, 
+            FileVersion.version_number == version_number
+        )
+    )
+    target_version = v_result.scalar_one_or_none()
+    if not target_version:
+        raise HTTPException(status_code=404, detail="Version not found")
+        
+    if target_version.version_number == f.current_version:
+        raise HTTPException(status_code=400, detail="Cannot restore to the current version")
+
+    # Increment current_version, update file to match target_version
+    f.current_version += 1
+    f.minio_key = target_version.minio_key
+    f.size = target_version.size
+    f.checksum_sha256 = target_version.checksum_sha256
+    
+    # Store this restoration as a new version
+    new_version = FileVersion(
+        file_id=f.id,
+        version_number=f.current_version,
+        minio_key=f.minio_key,
+        size=f.size,
+        checksum_sha256=f.checksum_sha256,
+        uploaded_by=user.id,
+    )
+    db.add(new_version)
+    await db.commit()
+
+    return {"message": f"Restored to version {version_number} successfully as version {f.current_version}"}
 
 
 # ══════════════════════════════════════════════
