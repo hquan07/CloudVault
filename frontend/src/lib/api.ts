@@ -65,6 +65,9 @@ async function request<T = unknown>(
       const retry = await fetch(url, { ...options, headers, cache: 'no-store' });
       if (retry.ok) {
         return retry.status === 204 ? (undefined as T) : await retry.json();
+      } else {
+        const data = await retry.json().catch(() => ({}));
+        throw new ApiError(data.detail || 'Request failed', retry.status, data);
       }
     }
     clearTokens();
