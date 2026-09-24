@@ -236,7 +236,10 @@ async def list_files(
     query = select(File).where(File.user_id == user.id, File.is_deleted == is_deleted)
 
     if folder_id is not None:
-        query = query.where(File.folder_id == folder_id)
+        if folder_id == "root":
+            query = query.where(File.folder_id == None)
+        else:
+            query = query.where(File.folder_id == folder_id)
     if is_starred is not None:
         query = query.where(File.is_starred == is_starred)
     if mime_type is not None:
@@ -265,7 +268,7 @@ async def list_files(
             select(Folder)
             .where(Folder.user_id == user.id, Folder.is_deleted == False)
         )
-        if folder_id:
+        if folder_id and folder_id != "root":
             folder_q = folder_q.where(Folder.parent_id == folder_id)
         else:
             folder_q = folder_q.where(Folder.parent_id == None)

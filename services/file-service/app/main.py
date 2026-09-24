@@ -165,6 +165,9 @@ async def health():
 # FILE UPLOAD / DOWNLOAD
 # ══════════════════════════════════════════════
 
+import asyncio
+import io
+
 @app.post("/api/v1/files/upload", status_code=201)
 async def upload_file(
     file: UploadFile,
@@ -191,13 +194,13 @@ async def upload_file(
     checksum = hashlib.sha256(content).hexdigest()
 
     # Upload to MinIO
-    import io
     try:
-        minio_client.put_object(
+        await asyncio.to_thread(
+            minio_client.put_object,
             settings.MINIO_BUCKET_FILES,
             minio_key,
             io.BytesIO(content),
-            length=file_size,
+            file_size,
             content_type=file.content_type or "application/octet-stream",
         )
     except Exception as e:
