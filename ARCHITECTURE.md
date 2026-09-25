@@ -10,7 +10,7 @@ graph TD
     User(("End User (Client)"))
 
     %% Layer 1.5
-    Nginx["Nginx LB (Reverse Proxy)"]
+    Nginx["Nginx LB (Public Host Entry Point)"]
 
     %% Layer 2
     Web["Next.js App (Web Application)"]
@@ -34,8 +34,8 @@ graph TD
     end
 
     %% Layer 6
-    Kafka{"Apache Kafka (Message Broker)"}
-    Redis[("Redis (Cache & Pub/Sub)")]
+    Kafka{"Apache Kafka (Internal Message Broker)"}
+    Redis[("Redis (Authenticated, Internal)")]
 
     %% Layer 7
     subgraph workers ["Asynchronous Workers (Python)"]
@@ -47,12 +47,12 @@ graph TD
     end
 
     %% Layer 8
-    MySQL[("MySQL (Relational DB)")]
+    MySQL[("MySQL (Internal Relational DB)")]
     MinIO[("MinIO (Object Storage)")]
-    ES[("Elasticsearch (Search Engine)")]
+    ES[("Elasticsearch (Authenticated Search)")]
 
     %% Connections
-    User -->|HTTP/s| Nginx
+    User -->|HTTP| Nginx
     Nginx -->|Proxy| Web
     Nginx -->|API Routing| API
 
@@ -81,7 +81,7 @@ graph TD
 
     %% Meta Service Connections
     Meta -->|R/W| MySQL
-    Meta -->|Query| ES
+    Meta -->|Authenticated Query| ES
     Meta <-->|Revocation Check / Pub-Sub| Redis
 
     %% Kafka to Workers
@@ -99,7 +99,7 @@ graph TD
     ThumbW -->|Update| MySQL
     ThumbW -.->|Notify| Redis
     SearchW -->|Read Content| MinIO
-    SearchW -->|Index| ES
+    SearchW -->|Least-Privilege Indexing| ES
     SearchW -.->|Notify| Redis
     NotifyW -.->|Publish Activity| Redis
 ```
@@ -110,7 +110,7 @@ graph TD
 - **End User:** The entry point to the system, interacting via web browsers.
 
 ### Layer 1.5: API Gateway / Load Balancer
-- **Nginx LB:** Acts as a reverse proxy, routing incoming HTTP and WebSocket traffic to the appropriate downstream services.
+- **Nginx LB:** Acts as the only public host entry point by default, routing incoming HTTP and WebSocket traffic to the appropriate downstream services. TLS should terminate here or at an upstream trusted proxy in production.
 
 ### Layer 2: Web Application
 - **Next.js App:** The primary frontend web application handling Server-Side Rendering (SSR) and Client-Side Routing.
@@ -131,8 +131,8 @@ graph TD
 - **Shared authorization rule:** Auth, File, and Metadata services all reject non-access JWTs, Redis-blacklisted tokens, and inactive users.
 
 ### Layer 6: Event Bus & Caching
-- **Apache Kafka:** The central message broker handling high-throughput, asynchronous events (`file-events`, `user-events`).
-- **Redis:** Stores access-token revocation markers checked by every API service and acts as the Pub/Sub broker for WebSocket notifications.
+- **Apache Kafka:** The Docker-internal message broker handling high-throughput, asynchronous events (`file-events`, `user-events`). It has no host port in the default Compose profile.
+- **Redis:** An authenticated, Docker-internal service that stores access-token revocation markers checked by every API service and acts as the Pub/Sub broker for WebSocket notifications.
 
 ### Layer 7: Asynchronous Workers (Python)
 - **Audit Logger:** Sole consumer responsible for persisting supported user/file events to the MySQL audit log.
@@ -142,16 +142,34 @@ graph TD
 - **Notification Relay:** Logical worker running inside Metadata Service. It consumes `file-events` with the dedicated `metadata-notifications` consumer group and publishes activity messages to Redis without writing audit records.
 
 ### Layer 8: Persistence & Search Databases
-- **MySQL:** The primary relational database storing users, metadata, file versions, and audit logs.
-- **MinIO:** S3-compatible object storage for storing raw files, thumbnails, and avatars.
-- **Elasticsearch:** The search engine powering full-text search capabilities across all files.
+- **MySQL:** The primary relational database storing users, metadata, file versions, and audit logs. It is reachable only from `cloudvault-network`.
+- **MinIO:** S3-compatible object storage for raw files, thumbnails, and avatars. Its host API and console bind to loopback by default.
+- **Elasticsearch:** An authenticated, Docker-internal search engine. Metadata Service and Search Indexer use the dedicated `cloudvault_app` role, scoped to the `cloudvault-files` index; Kibana uses `kibana_system`.
+
+## 🔐 Infrastructure Security Boundary
+
+```mermaid
+flowchart LR
+    Client[Client / Browser] -->|Host port 80| Gateway[Nginx]
+    Admin[Local administrator] -->|127.0.0.1 only| Tools[MinIO / Kibana / Kafka UI / Grafana / Prometheus / Jaeger]
+    Gateway --> App[Frontend + FastAPI services]
+    App --> Private[MySQL / Redis / Elasticsearch / Kafka / ZooKeeper]
+    Workers[Background workers] --> Private
+    Private -. no host ports .-> Network[cloudvault-network]
+```
+
+- Required credentials are injected from the gitignored `.env`; Compose rejects startup when a required secret is absent.
+- MySQL, Redis, Elasticsearch, Kafka, and ZooKeeper do not publish host ports.
+- Application and administration debug ports bind to `127.0.0.1` by default. Only Nginx binds to `0.0.0.0` unless explicitly reconfigured.
+- Elasticsearch rejects anonymous requests and separates the bootstrap administrator, Kibana system account, and least-privilege application account.
+- Secret rotation on persistent volumes must update both `.env` and the corresponding datastore account; changing only the environment file does not rotate an existing database user.
 
 ---
 
 ## 🔄 Data & Event Flows
 
 ### 1. Request Flow (Synchronous)
-1. The **End User** sends a request (HTTP/s).
+1. The **End User** sends a request to the Nginx host entry point.
 2. **Nginx** proxies the request to the **Next.js App** (for UI) or directly to the **API Client**.
 3. The **API Client** sends REST requests to one of the Core Microservices (**Auth**, **File**, or **Metadata**).
 4. Each protected service validates the JWT signature/type, checks Redis revocation state, and verifies that the user remains active.

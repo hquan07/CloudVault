@@ -5,12 +5,10 @@ services:
     container_name: cloudvault-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    ports:
-      - "3307:3306"
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
     volumes:
       - mysql-data:/var/lib/mysql
       - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d
@@ -28,9 +26,7 @@ services:
     image: redis:7-alpine
     container_name: cloudvault-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
-    ports:
-      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --appendonly yes
     volumes:
       - redis-data:/data
     healthcheck:
@@ -48,11 +44,11 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     ports:
-      - "${MINIO_PORT}:9000"
-      - "${MINIO_CONSOLE_PORT}:9001"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT}:9000"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -93,8 +89,6 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
       KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
-    ports:
-      - "2181:2181"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-log:/var/lib/zookeeper/log
@@ -117,17 +111,16 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-    ports:
-      - "9092:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -166,7 +159,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     ports:
-      - "8080:8080"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     networks:
       - cloudvault-network
 
@@ -177,20 +170,47 @@ services:
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:?ELASTIC_PASSWORD is required}
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - cluster.name=cloudvault-cluster
-    ports:
-      - "9200:9200"
     volumes:
       - es-data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
+      test: ["CMD-SHELL", "curl -fsS -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
+    networks:
+      - cloudvault-network
+
+  elasticsearch-init:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: cloudvault-elasticsearch-init
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?ELASTIC_PASSWORD is required}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:?KIBANA_SYSTEM_PASSWORD is required}
+      ELASTICSEARCH_APP_PASSWORD: ${ELASTICSEARCH_APP_PASSWORD:?ELASTICSEARCH_APP_PASSWORD is required}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        auth="elastic:$${ELASTIC_PASSWORD}"
+        base="http://elasticsearch:9200"
+        curl -fsS -u "$${auth}" -H 'Content-Type: application/json' \
+          -X POST "$${base}/_security/user/kibana_system/_password" \
+          -d "{\"password\":\"$${KIBANA_SYSTEM_PASSWORD}\"}"
+        curl -fsS -u "$${auth}" -H 'Content-Type: application/json' \
+          -X PUT "$${base}/_security/role/cloudvault_app" \
+          -d '{"cluster":["monitor"],"indices":[{"names":["cloudvault-files"],"privileges":["create_index","manage","read","write","view_index_metadata"]}]}'
+        curl -fsS -u "$${auth}" -H 'Content-Type: application/json' \
+          -X PUT "$${base}/_security/user/cloudvault_app" \
+          -d "{\"password\":\"$${ELASTICSEARCH_APP_PASSWORD}\",\"roles\":[\"cloudvault_app\"]}"
     networks:
       - cloudvault-network
 
@@ -199,12 +219,14 @@ services:
     container_name: cloudvault-kibana
     restart: unless-stopped
     depends_on:
-      elasticsearch:
-        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
     environment:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:?KIBANA_SYSTEM_PASSWORD is required}
     ports:
-      - "5601:5601"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:5601:5601"
     networks:
       - cloudvault-network
 
@@ -216,9 +238,10 @@ services:
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     ports:
-      - "16686:16686" # UI
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:16686:16686" # UI
+    expose:
+      - "4317" # OTLP gRPC, internal only
+      - "4318" # OTLP HTTP, internal only
     networks:
       - cloudvault-network
   prometheus:
@@ -230,7 +253,7 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=15d"
     ports:
-      - "9090:9090"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:9090:9090"
     volumes:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -245,10 +268,10 @@ services:
       - prometheus
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: cloudvault_grafana_2026
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "3001:3000"
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:3001:3000"
     volumes:
       - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -262,7 +285,7 @@ services:
     container_name: cloudvault-nginx
     restart: unless-stopped
     ports:
-      - "${NGINX_PORT}:80"
+      - "${NGINX_BIND_ADDRESS:-0.0.0.0}:${NGINX_PORT}:80"
     volumes:
       - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
@@ -279,10 +302,8 @@ services:
     container_name: cloudvault-frontend
     restart: unless-stopped
     env_file: .env
-    # We don't necessarily need to map port 3000 to the host since nginx will proxy it,
-    # but exposing it for direct access debugging is fine.
     ports:
-      - "3000:3000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     networks:
       - cloudvault-network
 
@@ -295,7 +316,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     ports:
-      - "8001:8000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:8001:8000"
     volumes:
       - ./services/auth-service:/app
     depends_on:
@@ -314,7 +335,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     ports:
-      - "8002:8000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:8002:8000"
     extra_hosts:
       - "localhost:host-gateway"
     volumes:
@@ -339,7 +360,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     ports:
-      - "8003:8000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:8003:8000"
     volumes:
       - ./services/metadata-service:/app
     depends_on:
@@ -347,8 +368,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
     networks:
       - cloudvault-network
 
@@ -380,8 +401,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+      elasticsearch-init:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
     networks:

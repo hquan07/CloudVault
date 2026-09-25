@@ -104,7 +104,13 @@ async def lifespan(app: FastAPI):
     global es_client, redis_client
     await init_auth_dependencies()
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-    es_client = AsyncElasticsearch(settings.ELASTICSEARCH_URL)
+    es_client = AsyncElasticsearch(
+        settings.ELASTICSEARCH_URL,
+        basic_auth=(
+            settings.ELASTICSEARCH_USERNAME,
+            settings.ELASTICSEARCH_APP_PASSWORD,
+        ),
+    )
     # Ensure the index exists
     try:
         if not await es_client.indices.exists(index="cloudvault-files"):

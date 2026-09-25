@@ -20,15 +20,17 @@ logger = logging.getLogger(__name__)
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_FILE_EVENTS", "file-events")
 ES_URL = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
+ES_USERNAME = os.getenv("ELASTICSEARCH_USERNAME", "cloudvault_app")
+ES_PASSWORD = os.environ["ELASTICSEARCH_APP_PASSWORD"]
 ES_INDEX = "cloudvault-files"
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "cloudvault_admin")
-MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "cloudvault_minio_2026")
+MINIO_SECRET_KEY = os.environ["MINIO_ROOT_PASSWORD"]
 BUCKET_FILES = os.getenv("MINIO_BUCKET_FILES", "cloudvault-files")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "cloudvault_redis_2026")
+REDIS_PASSWORD = os.environ["REDIS_PASSWORD"]
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:6379/0"
 
 def extract_text(file_data: bytes, mime_type: str) -> str:
@@ -109,7 +111,7 @@ async def main():
     
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
     
-    es = AsyncElasticsearch(ES_URL)
+    es = AsyncElasticsearch(ES_URL, basic_auth=(ES_USERNAME, ES_PASSWORD))
     await ensure_index(es)
 
     consumer = AIOKafkaConsumer(

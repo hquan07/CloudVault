@@ -3,6 +3,7 @@ CloudVault — Metadata Service Configuration
 """
 
 import os
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -10,27 +11,29 @@ class Settings(BaseSettings):
     # MySQL
     MYSQL_DATABASE: str = "cloudvault"
     MYSQL_USER: str = "cloudvault"
-    MYSQL_PASSWORD: str = "cloudvault_pass"
+    MYSQL_PASSWORD: str = Field(min_length=32)
     MYSQL_HOST: str = "mysql"
     MYSQL_PORT: int = 3306
 
     # Redis
-    REDIS_PASSWORD: str = "cloudvault_redis_2026"
+    REDIS_PASSWORD: str = Field(min_length=32)
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
 
     # Elasticsearch
     ELASTICSEARCH_URL: str = "http://elasticsearch:9200"
+    ELASTICSEARCH_USERNAME: str = "cloudvault_app"
+    ELASTICSEARCH_APP_PASSWORD: str = Field(min_length=32)
 
     # JWT (for token verification)
-    JWT_SECRET_KEY: str = "cloudvault-jwt-secret-key-change-me-in-production-2026"
+    JWT_SECRET_KEY: str = Field(min_length=32)
     JWT_ALGORITHM: str = "HS256"
 
     # MinIO (for presigned URLs)
     MINIO_ENDPOINT: str = "minio:9000"
     MINIO_PUBLIC_ENDPOINT: str = "localhost:9000"
     MINIO_ROOT_USER: str = "cloudvault_admin"
-    MINIO_ROOT_PASSWORD: str = "cloudvault_minio_2026"
+    MINIO_ROOT_PASSWORD: str = Field(min_length=32)
     MINIO_BUCKET_FILES: str = "cloudvault-files"
 
     # Kafka

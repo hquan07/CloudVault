@@ -30,7 +30,7 @@ import {
   User
 } from 'lucide-react';
 
-// --- Metrics Data Mock ---
+// --- Architecture metadata shown when a node is selected ---
 const getMetricsForNode = (nodeId) => {
   const metricsMap = {
     user: { desc: 'Platform Users', stat: 'Online: 1,204' },
@@ -40,14 +40,14 @@ const getMetricsForNode = (nodeId) => {
     auth_context: { desc: 'React Context', stat: 'State Updates: 12/s' },
     notifications: { desc: 'WS Connection', stat: 'Latency: 12ms' },
     api_client: { desc: 'API Gateway/Client', stat: 'Requests: 350/s' },
-    nginx: { desc: 'Nginx LB/Proxy', stat: 'Req/s: 1,550' },
+    nginx: { desc: 'Nginx Gateway', stat: 'Exposure: Public host entry point' },
     
     auth: { desc: 'FastAPI Auth', stat: 'Tokens/s: 45' },
     files: { desc: 'Streaming File API', stat: 'Chunk Buffer: 1MB' },
     metadata: { desc: 'Metadata + WebSocket', stat: 'Queries: 210/s' },
     
-    kafka: { desc: 'Apache Kafka', stat: 'Msgs/s: 5,420' },
-    redis: { desc: 'Redis Cache/PubSub', stat: 'Hit Rate: 99.1%' },
+    kafka: { desc: 'Apache Kafka', stat: 'Network: Docker-internal only' },
+    redis: { desc: 'Redis Cache/PubSub', stat: 'Authenticated · Docker-internal only' },
     
     audit_worker: { desc: 'Audit Logger', stat: 'Processed: 120/s' },
     zip_worker: { desc: 'ZIP Extractor', stat: 'Active Jobs: 14' },
@@ -55,9 +55,9 @@ const getMetricsForNode = (nodeId) => {
     search_worker: { desc: 'Search Indexer', stat: 'Docs/s: 45' },
     notification_relay: { desc: 'Kafka → Redis Relay', stat: 'Consumer Group: metadata-notifications' },
     
-    mysql: { desc: 'MySQL DB', stat: 'QPS: 1,450' },
-    minio: { desc: 'MinIO Storage', stat: 'Used: 4.2TB' },
-    elasticsearch: { desc: 'Elasticsearch', stat: 'Index Size: 120GB' },
+    mysql: { desc: 'MySQL DB', stat: 'Network: Docker-internal only' },
+    minio: { desc: 'MinIO Storage', stat: 'Host access: Loopback only' },
+    elasticsearch: { desc: 'Elasticsearch', stat: 'Auth: cloudvault_app · Internal only' },
   };
   return metricsMap[nodeId] || { desc: 'System Component', stat: 'Healthy' };
 };
@@ -162,7 +162,7 @@ const initialNodes = [
   { id: 'user', type: 'custom', position: { x: 600, y: 0 }, data: { label: 'End User', sublabel: 'Client', icon: 'user', color: '#3b82f6' } },
   
   // Layer 1.5
-  { id: 'nginx', type: 'custom', position: { x: 600, y: 120 }, data: { label: 'Nginx LB', sublabel: 'Reverse Proxy', icon: 'globe', color: '#10b981' } },
+  { id: 'nginx', type: 'custom', position: { x: 600, y: 120 }, data: { label: 'Nginx LB', sublabel: 'Public Host Entry', icon: 'globe', color: '#10b981' } },
 
   // Layer 2
   { id: 'web', type: 'custom', position: { x: 600, y: 240 }, data: { label: 'Next.js App', sublabel: 'Web Application', icon: 'monitor', color: '#3b82f6' } },
@@ -182,8 +182,8 @@ const initialNodes = [
   { id: 'metadata', type: 'custom', position: { x: 850, y: 520 }, data: { label: 'Metadata Service', sublabel: 'REST + WebSocket', icon: 'server', color: '#f59e0b' } },
   
   // Layer 6 Event Bus & Cache
-  { id: 'kafka', type: 'custom', position: { x: 725, y: 680 }, data: { label: 'Kafka', sublabel: 'Message Broker', icon: 'zap', color: '#ef4444' } },
-  { id: 'redis', type: 'custom', position: { x: 1100, y: 680 }, data: { label: 'Redis', sublabel: 'Cache & Pub/Sub', icon: 'database', color: '#ef4444' } },
+  { id: 'kafka', type: 'custom', position: { x: 725, y: 680 }, data: { label: 'Kafka', sublabel: 'Internal Message Broker', icon: 'zap', color: '#ef4444' } },
+  { id: 'redis', type: 'custom', position: { x: 1100, y: 680 }, data: { label: 'Redis', sublabel: 'Authenticated · Internal', icon: 'database', color: '#ef4444' } },
   
   // Layer 7 Workers
   { id: 'audit_worker', type: 'custom', position: { x: 100, y: 840 }, data: { label: 'Audit Logger', sublabel: 'Python Worker', icon: 'terminal', color: '#10b981' } },
@@ -193,9 +193,9 @@ const initialNodes = [
   { id: 'notification_relay', type: 'custom', position: { x: 1225, y: 840 }, data: { label: 'Notification Relay', sublabel: 'Metadata Consumer', icon: 'bell', color: '#10b981' } },
   
   // Layer 8 Databases
-  { id: 'mysql', type: 'custom', position: { x: 225, y: 1000 }, data: { label: 'MySQL', sublabel: 'Relational DB', icon: 'database', color: '#ef4444' } },
-  { id: 'minio', type: 'custom', position: { x: 500, y: 1000 }, data: { label: 'MinIO', sublabel: 'Object Storage', icon: 'database', color: '#ef4444' } },
-  { id: 'elasticsearch', type: 'custom', position: { x: 975, y: 1000 }, data: { label: 'Elasticsearch', sublabel: 'Search Engine', icon: 'database', color: '#ef4444' } },
+  { id: 'mysql', type: 'custom', position: { x: 225, y: 1000 }, data: { label: 'MySQL', sublabel: 'Internal Relational DB', icon: 'database', color: '#ef4444' } },
+  { id: 'minio', type: 'custom', position: { x: 500, y: 1000 }, data: { label: 'MinIO', sublabel: 'Loopback Admin Access', icon: 'database', color: '#ef4444' } },
+  { id: 'elasticsearch', type: 'custom', position: { x: 975, y: 1000 }, data: { label: 'Elasticsearch', sublabel: 'Authenticated · Internal', icon: 'database', color: '#ef4444' } },
 ];
 
 const defaultEdgeOptions = {
@@ -214,7 +214,7 @@ const dashedLine = { strokeDasharray: '5,5' };
 
 const initialEdges = [
   // User -> Nginx
-  { id: 'e-user-nginx', source: 'user', target: 'nginx', label: 'HTTP/s', ...defaultEdgeOptions, style: greenLine },
+  { id: 'e-user-nginx', source: 'user', target: 'nginx', label: 'HTTP', ...defaultEdgeOptions, style: greenLine },
   
   // Nginx -> Web
   { id: 'e-nginx-web', source: 'nginx', target: 'web', label: 'proxy', ...defaultEdgeOptions, style: blueLine },
@@ -244,7 +244,7 @@ const initialEdges = [
   { id: 'e-files-redis', source: 'files', target: 'redis', label: 'check revocation', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
   
   { id: 'e-meta-mysql', source: 'metadata', target: 'mysql', label: 'R/W', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-meta-es', source: 'metadata', target: 'elasticsearch', label: 'query', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
+  { id: 'e-meta-es', source: 'metadata', target: 'elasticsearch', label: 'authenticated query', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
   { id: 'e-meta-redis', source: 'metadata', target: 'redis', label: 'JWT check + subscribe', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
   
   // Kafka -> Workers
@@ -265,7 +265,7 @@ const initialEdges = [
   { id: 'e-thumb-redis', source: 'thumbnail_worker', target: 'redis', label: 'notify', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
   
   { id: 'e-search-minio', source: 'search_worker', target: 'minio', label: 'read content', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
-  { id: 'e-search-es', source: 'search_worker', target: 'elasticsearch', label: 'index', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-search-es', source: 'search_worker', target: 'elasticsearch', label: 'least-privilege index', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-search-redis', source: 'search_worker', target: 'redis', label: 'notify', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
   { id: 'e-notify-redis', source: 'notification_relay', target: 'redis', label: 'publish activity', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
 ];
@@ -289,7 +289,7 @@ export default function ArchitectureTab() {
         <div>
           <h2 style={{ fontSize: '24px', margin: '0 0 8px 0', fontWeight: 'bold' }}>CloudVault Architecture</h2>
           <p style={{ color: '#94a3b8', margin: 0 }}>
-            Interactive System Topology. <span style={{ color: '#38bdf8' }}>Single-click</span> node to view real-time metrics. <span style={{ color: '#ef4444' }}>Double-click</span> to toggle health status.
+            Interactive System Topology. <span style={{ color: '#38bdf8' }}>Single-click</span> a node to inspect its role and exposure. <span style={{ color: '#ef4444' }}>Double-click</span> to simulate a health-state change.
           </p>
         </div>
       </div>

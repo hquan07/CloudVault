@@ -27,11 +27,11 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_FILE_EVENTS", "file-events")
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "cloudvault_admin")
-MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "cloudvault_minio_2026")
+MINIO_SECRET_KEY = os.environ["MINIO_ROOT_PASSWORD"]
 BUCKET_FILES = os.getenv("MINIO_BUCKET_FILES", "cloudvault-files")
 
 DB_USER = os.getenv("MYSQL_USER", "cloudvault")
-DB_PASS = os.getenv("MYSQL_PASSWORD", "cloudvault_pass")
+DB_PASS = os.environ["MYSQL_PASSWORD"]
 DB_HOST = os.getenv("MYSQL_HOST", "mysql")
 DB_PORT = os.getenv("MYSQL_PORT", "3306")
 DB_NAME = os.getenv("MYSQL_DATABASE", "cloudvault")
