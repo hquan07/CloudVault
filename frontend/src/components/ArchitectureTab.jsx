@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   ReactFlow,
   Background,
@@ -33,26 +33,26 @@ import {
 // --- Architecture metadata shown when a node is selected ---
 const getMetricsForNode = (nodeId) => {
   const metricsMap = {
-    user: { desc: 'Platform Users', stat: 'Online: 1,204' },
-    web: { desc: 'Next.js App', stat: 'Active Sessions: 1,150' },
-    file_preview: { desc: 'Preview Component', stat: 'Renders/s: 24' },
-    share_ui: { desc: 'Share Component', stat: 'Interactions/m: 45' },
-    auth_context: { desc: 'React Context', stat: 'State Updates: 12/s' },
-    notifications: { desc: 'WS Connection', stat: 'Latency: 12ms' },
-    api_client: { desc: 'API Gateway/Client', stat: 'Requests: 350/s' },
+    user: { desc: 'Platform Users', stat: 'Browser client' },
+    web: { desc: 'Next.js App', stat: 'Server and client rendering' },
+    file_preview: { desc: 'Preview Component', stat: 'Media, text, PDF and versions' },
+    share_ui: { desc: 'Share Component', stat: 'Managed links and folder roles' },
+    auth_context: { desc: 'React Context', stat: 'Session and profile state' },
+    notifications: { desc: 'WebSocket Connection', stat: 'Redis-backed activity events' },
+    api_client: { desc: 'API Client', stat: 'Fetch, refresh and retry' },
     nginx: { desc: 'Nginx Gateway', stat: 'Exposure: Public host entry point' },
     
-    auth: { desc: 'FastAPI Auth', stat: 'Tokens/s: 45' },
+    auth: { desc: 'FastAPI Auth', stat: 'Live health endpoint' },
     files: { desc: 'Streaming File API', stat: 'Chunk Buffer: 1MB' },
-    metadata: { desc: 'Metadata + WebSocket', stat: 'Queries: 210/s' },
+    metadata: { desc: 'Metadata + WebSocket', stat: 'Live health endpoint' },
     
     kafka: { desc: 'Apache Kafka', stat: 'Network: Docker-internal only' },
     redis: { desc: 'Redis Cache/PubSub', stat: 'Authenticated · Docker-internal only' },
     
-    audit_worker: { desc: 'Audit Logger', stat: 'Processed: 120/s' },
-    zip_worker: { desc: 'ZIP Extractor', stat: 'Active Jobs: 14' },
-    thumbnail_worker: { desc: 'Thumbnail Worker', stat: 'Queue Size: 2' },
-    search_worker: { desc: 'Search Indexer', stat: 'Docs/s: 45' },
+    audit_worker: { desc: 'Audit Logger', stat: 'Dedicated Kafka consumer group' },
+    zip_worker: { desc: 'ZIP Extractor', stat: 'Quota and archive safety guards' },
+    thumbnail_worker: { desc: 'Thumbnail Worker', stat: 'Asynchronous image processing' },
+    search_worker: { desc: 'Search Indexer', stat: 'Least-privilege Elasticsearch writer' },
     notification_relay: { desc: 'Kafka → Redis Relay', stat: 'Consumer Group: metadata-notifications' },
     
     mysql: { desc: 'MySQL DB', stat: 'Network: Docker-internal only' },
@@ -64,8 +64,9 @@ const getMetricsForNode = (nodeId) => {
 
 // --- Custom Node Component ---
 const CustomNode = ({ id, data }) => {
-  const [isHealthy, setIsHealthy] = useState(true);
   const [showMetrics, setShowMetrics] = useState(false);
+  const health = data.health || 'documented';
+  const isHealthy = health !== 'unhealthy';
 
   // Icons mapping
   const IconMap = {
@@ -90,14 +91,12 @@ const CustomNode = ({ id, data }) => {
   
   const Icon = IconMap[data.icon] || Server;
 
-  const handleDoubleClick = () => setIsHealthy(!isHealthy);
   const handleClick = () => setShowMetrics(!showMetrics);
 
   const metrics = getMetricsForNode(id);
 
   return (
     <div
-      onDoubleClick={handleDoubleClick}
       onClick={handleClick}
       style={{
         padding: '12px 16px',
@@ -128,10 +127,10 @@ const CustomNode = ({ id, data }) => {
       <div style={{
         position: 'absolute', top: '-6px', right: '-6px',
         width: '14px', height: '14px', borderRadius: '50%',
-        background: isHealthy ? '#22c55e' : '#ef4444',
+        background: health === 'healthy' ? '#22c55e' : health === 'unhealthy' ? '#ef4444' : '#64748b',
         border: '2px solid #0f172a',
-        boxShadow: isHealthy ? '0 0 8px #22c55e' : '0 0 8px #ef4444',
-        animation: isHealthy ? 'none' : 'pulse 1s infinite'
+        boxShadow: health === 'healthy' ? '0 0 8px #22c55e' : health === 'unhealthy' ? '0 0 8px #ef4444' : 'none',
+        animation: health === 'unhealthy' ? 'pulse 1s infinite' : 'none'
       }} />
 
       {/* Metrics Tooltip */}
@@ -273,6 +272,25 @@ const initialEdges = [
 export default function ArchitectureTab() {
   const [nodes, setNodes] = useState(initialNodes);
   const [edges, setEdges] = useState(initialEdges);
+  const [lastChecked, setLastChecked] = useState(null);
+
+  useEffect(() => {
+    const checkHealth = async () => {
+      const targets = { auth: '/health/auth', files: '/health/file', metadata: '/health/metadata' };
+      const results = await Promise.all(Object.entries(targets).map(async ([id, url]) => {
+        try { const response = await fetch(url, { cache: 'no-store' }); return [id, response.ok ? 'healthy' : 'unhealthy']; }
+        catch { return [id, 'unhealthy']; }
+      }));
+      setNodes(current => current.map(node => {
+        const result = results.find(([id]) => id === node.id);
+        return result ? { ...node, data: { ...node.data, health: result[1] } } : node;
+      }));
+      setLastChecked(new Date());
+    };
+    void checkHealth();
+    const timer = window.setInterval(checkHealth, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const onNodesChange = useCallback(
     (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -289,8 +307,9 @@ export default function ArchitectureTab() {
         <div>
           <h2 style={{ fontSize: '24px', margin: '0 0 8px 0', fontWeight: 'bold' }}>CloudVault Architecture</h2>
           <p style={{ color: '#94a3b8', margin: 0 }}>
-            Interactive System Topology. <span style={{ color: '#38bdf8' }}>Single-click</span> a node to inspect its role and exposure. <span style={{ color: '#ef4444' }}>Double-click</span> to simulate a health-state change.
+            Live topology. <span style={{ color: '#38bdf8' }}>Click</span> a node to inspect its role. API health refreshes every 30 seconds.
           </p>
+          <div style={{ display: 'flex', gap: '14px', marginTop: '10px', color: '#94a3b8', fontSize: '12px' }}><span>🟢 Live health</span><span>⚪ Documented component</span>{lastChecked && <span>Checked {lastChecked.toLocaleTimeString()}</span>}</div>
         </div>
       </div>
 

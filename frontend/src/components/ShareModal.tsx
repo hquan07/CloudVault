@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { X, Share2, Copy, Check, Lock, Calendar, DownloadCloud, Loader2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { X, Share2, Copy, Check, Lock, Calendar, DownloadCloud, Loader2, Link2, Trash2 } from 'lucide-react';
 import { shareApi } from '@/lib/api';
 import { FileItem } from '@/app/dashboard/page';
 
@@ -18,6 +18,22 @@ export function ShareModal({ file, onClose }: Props) {
   const [error, setError] = useState('');
   const [shareLink, setShareLink] = useState('');
   const [copied, setCopied] = useState(false);
+  const [links, setLinks] = useState<any[]>([]);
+  const [loadingLinks, setLoadingLinks] = useState(true);
+
+  const loadLinks = async () => {
+    setLoadingLinks(true);
+    try {
+      const data = await shareApi.listFileLinks(file.id) as { links: any[] };
+      setLinks(data.links || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load existing links');
+    } finally {
+      setLoadingLinks(false);
+    }
+  };
+
+  useEffect(() => { void loadLinks(); }, [file.id]);
 
   const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,6 +49,7 @@ export function ShareModal({ file, onClose }: Props) {
       
       const link = `${window.location.origin}/share/${data.token}`;
       setShareLink(link);
+      await loadLinks();
     } catch (err: any) {
       setError(err.message || 'Failed to create share link');
     } finally {
@@ -40,10 +57,20 @@ export function ShareModal({ file, onClose }: Props) {
     }
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(shareLink);
+  const copyToClipboard = async (link = shareLink) => {
+    await navigator.clipboard.writeText(link);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const revokeLink = async (linkId: string) => {
+    if (!confirm('Revoke this share link? Anyone using it will immediately lose access.')) return;
+    try {
+      await shareApi.revokeLink(linkId);
+      setLinks(current => current.map(link => link.id === linkId ? { ...link, is_active: false } : link));
+    } catch (err: any) {
+      setError(err.message || 'Failed to revoke link');
+    }
   };
 
   return (
@@ -149,7 +176,7 @@ export function ShareModal({ file, onClose }: Props) {
                   className="w-full bg-gray-950/50 border border-gray-700 rounded-xl pl-4 pr-14 py-4 text-gray-300 focus:outline-none"
                 />
                 <button
-                  onClick={copyToClipboard}
+                  onClick={() => copyToClipboard()}
                   className="absolute right-2 top-2 bottom-2 aspect-square flex items-center justify-center bg-gray-800 hover:bg-gray-700 text-cyan-400 rounded-lg transition-colors"
                   title="Copy link"
                 >
@@ -165,6 +192,21 @@ export function ShareModal({ file, onClose }: Props) {
               </button>
             </div>
           )}
+
+          <div className="mt-7 border-t border-gray-800 pt-6">
+            <div className="mb-3 flex items-center justify-between"><h4 className="flex items-center gap-2 font-medium text-gray-200"><Link2 size={17} /> Existing links</h4><span className="text-xs text-gray-500">{links.filter(link => link.is_active).length} active</span></div>
+            {loadingLinks ? <div className="py-5 text-center"><Loader2 className="mx-auto animate-spin text-cyan-500" size={20} /></div> : links.length === 0 ? <p className="rounded-xl bg-gray-800/40 p-4 text-center text-sm text-gray-500">No share links yet.</p> : <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+              {links.map(link => {
+                const expired = link.expires_at && new Date(link.expires_at) < new Date();
+                const exhausted = link.max_downloads && link.download_count >= link.max_downloads;
+                const active = link.is_active && !expired && !exhausted;
+                const url = `${window.location.origin}/share/${link.token}`;
+                return <div key={link.id} className="rounded-xl border border-gray-800 bg-gray-950/40 p-3">
+                  <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${active ? 'bg-green-400' : 'bg-gray-600'}`} /><span className={`text-xs font-medium ${active ? 'text-green-400' : 'text-gray-500'}`}>{active ? 'Active' : expired ? 'Expired' : exhausted ? 'Limit reached' : 'Revoked'}</span>{link.has_password && <Lock size={12} className="text-yellow-400" />}</div><p className="mt-1 truncate text-xs text-gray-500">{url}</p><p className="mt-1 text-[11px] text-gray-600">{link.download_count}{link.max_downloads ? ` / ${link.max_downloads}` : ''} downloads · {link.expires_at ? `expires ${new Date(link.expires_at).toLocaleDateString()}` : 'no expiry'}</p></div><button onClick={() => copyToClipboard(url)} className="p-1.5 text-gray-500 hover:text-cyan-400" title="Copy link"><Copy size={15} /></button>{link.is_active && <button onClick={() => revokeLink(link.id)} className="p-1.5 text-gray-500 hover:text-red-400" title="Revoke link"><Trash2 size={15} /></button>}</div>
+                </div>;
+              })}
+            </div>}
+          </div>
         </div>
       </div>
     </div>

@@ -454,12 +454,40 @@ async def search_files(
     q: str = Query(..., min_length=1),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    mime_type: Optional[str] = Query(None),
+    min_size: Optional[int] = Query(None, ge=0),
+    max_size: Optional[int] = Query(None, ge=0),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
+    sort_by: str = Query("relevance", pattern="^(relevance|created_at|updated_at|size)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     # Try Elasticsearch first
     if es_client:
         try:
+            filters = [
+                {"term": {"user_id": user.id}},
+                {"term": {"is_deleted": False}},
+            ]
+            if mime_type:
+                filters.append({"prefix": {"mime_type": mime_type}})
+            if min_size is not None or max_size is not None:
+                size_range = {}
+                if min_size is not None:
+                    size_range["gte"] = min_size
+                if max_size is not None:
+                    size_range["lte"] = max_size
+                filters.append({"range": {"size": size_range}})
+            if date_from or date_to:
+                date_range = {}
+                if date_from:
+                    date_range["gte"] = date_from.isoformat()
+                if date_to:
+                    date_range["lte"] = date_to.isoformat()
+                filters.append({"range": {"created_at": date_range}})
+
             body = {
                 "query": {
                     "bool": {
@@ -473,10 +501,7 @@ async def search_files(
                                 }
                             }
                         ],
-                        "filter": [
-                            {"term": {"user_id": user.id}},
-                            {"term": {"is_deleted": False}},
-                        ],
+                        "filter": filters,
                     }
                 },
                 "from": (page - 1) * page_size,
@@ -485,6 +510,8 @@ async def search_files(
                     "fields": {"original_name": {}, "filename": {}, "content": {}}
                 },
             }
+            if sort_by != "relevance":
+                body["sort"] = [{sort_by: {"order": sort_order}}]
             es_result = await es_client.search(index="cloudvault-files", body=body)
             hits = es_result["hits"]
             total = hits["total"]["value"] if isinstance(hits["total"], dict) else hits["total"]
@@ -502,26 +529,30 @@ async def search_files(
             pass  # Fallback to MySQL LIKE search
 
     # Fallback: MySQL search
-    query = (
-        select(File)
-        .where(
-            File.user_id == user.id,
-            File.is_deleted == False,
-            File.original_name.like(f"%{q}%"),
-        )
-        .order_by(File.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
+    conditions = [
+        File.user_id == user.id,
+        File.is_deleted == False,
+        File.original_name.like(f"%{q}%"),
+    ]
+    if mime_type:
+        conditions.append(File.mime_type.like(f"{mime_type}%"))
+    if min_size is not None:
+        conditions.append(File.size >= min_size)
+    if max_size is not None:
+        conditions.append(File.size <= max_size)
+    if date_from:
+        conditions.append(File.created_at >= date_from)
+    if date_to:
+        conditions.append(File.created_at <= date_to)
+
+    sort_column = getattr(File, sort_by, File.updated_at) if sort_by != "relevance" else File.updated_at
+    order_clause = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+    query = select(File).where(*conditions).order_by(order_clause).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     files = result.scalars().all()
 
     count_q = select(func.count()).select_from(
-        select(File).where(
-            File.user_id == user.id,
-            File.is_deleted == False,
-            File.original_name.like(f"%{q}%"),
-        ).subquery()
+        select(File).where(*conditions).subquery()
     )
     total = (await db.execute(count_q)).scalar() or 0
 

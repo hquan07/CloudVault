@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Upload, FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive, LayoutGrid, List } from 'lucide-react';
+import { FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive, LayoutGrid, List, X, RotateCcw, CheckCircle2, XCircle, Square, CheckSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
@@ -32,6 +32,15 @@ export interface FolderItem {
   depth: number;
   created_at: string;
 }
+
+type UploadTask = {
+  id: string;
+  file: File;
+  relativePath?: string;
+  progress: number;
+  status: 'queued' | 'uploading' | 'success' | 'error' | 'cancelled';
+  error?: string;
+};
 
 const FileIconDisplay = ({ mimeType, size = 24 }: { mimeType: string, size?: number }) => {
   const iconType = getFileIcon(mimeType);
@@ -65,12 +74,16 @@ export default function DrivePage() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'success'>('idle');
+  const [uploadQueue, setUploadQueue] = useState<UploadTask[]>([]);
+  const [uploadCenterOpen, setUploadCenterOpen] = useState(true);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  const uploading = uploadQueue.some(task => task.status === 'queued' || task.status === 'uploading');
   const [error, setError] = useState('');
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [shareFile, setShareFile] = useState<FileItem | null>(null);
   const [shareFolder, setShareFolder] = useState<FolderItem | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Drag & Drop / Dropdown states
   const [isDragActive, setIsDragActive] = useState(false);
@@ -100,47 +113,6 @@ export default function DrivePage() {
   }, []);
 
   useEffect(() => {
-    let dragCounter = 0;
-    const handleDragEnter = (e: DragEvent) => {
-      e.preventDefault();
-      dragCounter++;
-      if (e.dataTransfer?.items && e.dataTransfer.items.length > 0) {
-        setIsDragActive(true);
-      }
-    };
-    const handleDragLeave = (e: DragEvent) => {
-      e.preventDefault();
-      dragCounter--;
-      if (dragCounter === 0) {
-        setIsDragActive(false);
-      }
-    };
-    const handleDragOver = (e: DragEvent) => {
-      e.preventDefault();
-    };
-    const handleDrop = (e: DragEvent) => {
-      e.preventDefault();
-      dragCounter = 0;
-      setIsDragActive(false);
-      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-        processFiles(Array.from(e.dataTransfer.files));
-      }
-    };
-
-    window.addEventListener('dragenter', handleDragEnter);
-    window.addEventListener('dragleave', handleDragLeave);
-    window.addEventListener('dragover', handleDragOver);
-    window.addEventListener('drop', handleDrop);
-
-    return () => {
-      window.removeEventListener('dragenter', handleDragEnter);
-      window.removeEventListener('dragleave', handleDragLeave);
-      window.removeEventListener('dragover', handleDragOver);
-      window.removeEventListener('drop', handleDrop);
-    };
-  }, [currentFolderId]);
-
-  useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsUploadMenuOpen(false);
@@ -168,32 +140,70 @@ export default function DrivePage() {
 
   useEffect(() => {
     loadFiles();
+    setSelectedIds(new Set());
   }, [currentFolderId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        setSelectedIds(new Set(files.map(file => file.id)));
+      }
+      if (event.key === 'Escape') setSelectedIds(new Set());
+      if (event.key === 'Delete' && selectedIds.size > 0) void handleBulkDelete();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [files, selectedIds]);
 
   const processFiles = async (filesArray: File[]) => {
     if (filesArray.length === 0) return;
-    
-    setUploading(true);
-    setUploadStatus('uploading');
     setError('');
-    
-    try {
-      for (const file of filesArray) {
-        const relativePath = (file as any).customRelativePath || file.webkitRelativePath || undefined;
-        await fileApi.upload(file, currentFolderId || undefined, relativePath);
+    setUploadCenterOpen(true);
+    const tasks: UploadTask[] = filesArray.map((file, index) => ({
+      id: `${Date.now()}-${index}-${file.name}`,
+      file,
+      relativePath: (file as any).customRelativePath || file.webkitRelativePath || undefined,
+      progress: 0,
+      status: 'queued',
+    }));
+    setUploadQueue(current => [...current, ...tasks]);
+
+    for (const task of tasks) {
+      const controller = new AbortController();
+      uploadControllers.current.set(task.id, controller);
+      setUploadQueue(current => current.map(item => item.id === task.id ? { ...item, status: 'uploading' } : item));
+      try {
+        await fileApi.uploadWithProgress(
+          task.file,
+          currentFolderId || undefined,
+          task.relativePath,
+          progress => setUploadQueue(current => current.map(item => item.id === task.id ? { ...item, progress } : item)),
+          controller.signal,
+        );
+        setUploadQueue(current => current.map(item => item.id === task.id ? { ...item, progress: 100, status: 'success' } : item));
+      } catch (err: any) {
+        const cancelled = err?.name === 'AbortError';
+        setUploadQueue(current => current.map(item => item.id === task.id ? {
+          ...item,
+          status: cancelled ? 'cancelled' : 'error',
+          error: cancelled ? 'Cancelled' : (err.message || 'Upload failed'),
+        } : item));
+      } finally {
+        uploadControllers.current.delete(task.id);
       }
-      await loadFiles();
-      refreshUser();
-      setUploadStatus('success');
-      setTimeout(() => {
-        setUploading(false);
-        setUploadStatus('idle');
-      }, 3000);
-    } catch (err: any) {
-      setError(err.message || 'Upload failed');
-      setUploading(false);
-      setUploadStatus('idle');
     }
+    await loadFiles();
+    refreshUser();
+  };
+
+  const cancelUpload = (taskId: string) => uploadControllers.current.get(taskId)?.abort();
+
+  const retryUpload = async (task: UploadTask) => {
+    setUploadQueue(current => current.filter(item => item.id !== task.id));
+    await processFiles([task.file]);
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -231,6 +241,59 @@ export default function DrivePage() {
       setFiles(files.map(f => f.id === fileId ? { ...f, is_starred: !currentStatus } : f));
     } catch (err: any) {
       setError(err.message || 'Failed to update star status');
+    }
+  };
+
+  const toggleSelection = (fileId: string) => {
+    setSelectedIds(current => {
+      const next = new Set(current);
+      if (next.has(fileId)) next.delete(fileId); else next.add(fileId);
+      return next;
+    });
+  };
+
+  const handleBulkStar = async () => {
+    setBulkBusy(true);
+    try {
+      await Promise.all(files.filter(file => selectedIds.has(file.id)).map(file => metaApi.updateFile(file.id, { is_starred: true })));
+      setFiles(current => current.map(file => selectedIds.has(file.id) ? { ...file, is_starred: true } : file));
+      setSelectedIds(new Set());
+    } catch (err: any) {
+      setError(err.message || 'Failed to star selected files');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleBulkDownload = async () => {
+    setBulkBusy(true);
+    try {
+      for (const file of files.filter(item => selectedIds.has(item.id))) {
+        const data = await fileApi.download(file.id);
+        const anchor = document.createElement('a');
+        anchor.href = data.download_url;
+        anchor.download = file.original_name;
+        anchor.click();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to download selected files');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (!confirm(`Move ${selectedIds.size} selected file(s) to trash?`)) return;
+    setBulkBusy(true);
+    try {
+      await Promise.all([...selectedIds].map(id => fileApi.deleteFile(id)));
+      setFiles(current => current.filter(file => !selectedIds.has(file.id)));
+      setSelectedIds(new Set());
+      refreshUser();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete selected files');
+    } finally {
+      setBulkBusy(false);
     }
   };
 
@@ -312,17 +375,6 @@ export default function DrivePage() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Smart Drag & Drop Overlay */}
-      {isDragActive && (
-        <div className="absolute inset-0 z-50 bg-cyan-950/40 backdrop-blur-sm border-2 border-dashed border-cyan-500 rounded-3xl flex flex-col items-center justify-center transition-all">
-          <div className="w-24 h-24 bg-gray-900 rounded-full flex items-center justify-center mb-6 shadow-2xl shadow-cyan-900/50">
-            <UploadCloud size={48} className="text-cyan-400 animate-bounce" />
-          </div>
-          <h2 className="text-3xl font-bold text-white mb-2">Drop to Upload</h2>
-          <p className="text-cyan-200 text-lg">Release files or folders to securely store them.</p>
-        </div>
-      )}
-
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -402,6 +454,27 @@ export default function DrivePage() {
         </div>
       )}
 
+      {files.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-800 bg-gray-900/70 px-4 py-3">
+          <button
+            onClick={() => setSelectedIds(selectedIds.size === files.length ? new Set() : new Set(files.map(file => file.id)))}
+            className="flex items-center gap-2 text-sm text-gray-300 hover:text-white"
+          >
+            {selectedIds.size === files.length ? <CheckSquare size={18} className="text-cyan-400" /> : <Square size={18} />}
+            {selectedIds.size > 0 ? `${selectedIds.size} selected` : 'Select all'}
+          </button>
+          {selectedIds.size > 0 && (
+            <>
+              <div className="h-5 w-px bg-gray-700" />
+              <button disabled={bulkBusy} onClick={handleBulkDownload} className="text-sm text-gray-300 hover:text-cyan-400 disabled:opacity-50 flex items-center gap-1.5"><Download size={16} /> Download</button>
+              <button disabled={bulkBusy} onClick={handleBulkStar} className="text-sm text-gray-300 hover:text-yellow-400 disabled:opacity-50 flex items-center gap-1.5"><Star size={16} /> Star</button>
+              <button disabled={bulkBusy} onClick={handleBulkDelete} className="text-sm text-gray-300 hover:text-red-400 disabled:opacity-50 flex items-center gap-1.5"><Trash2 size={16} /> Trash</button>
+              <button onClick={() => setSelectedIds(new Set())} className="ml-auto text-xs text-gray-500 hover:text-white">Clear</button>
+            </>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {[...Array(8)].map((_, i) => <SkeletonCard key={i} />)}
@@ -472,10 +545,17 @@ export default function DrivePage() {
               exit={{ opacity: 0, scale: 0.9 }}
               layout
               key={file.id} 
-              className={`group bg-gray-900 border border-gray-800 p-5 hover:border-cyan-500/30 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
-              onClick={() => setPreviewFile(file)}
+              className={`group relative bg-gray-900 border p-5 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${selectedIds.has(file.id) ? 'border-cyan-500 ring-1 ring-cyan-500/40' : 'border-gray-800 hover:border-cyan-500/30'} ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
+              onClick={() => selectedIds.size > 0 ? toggleSelection(file.id) : setPreviewFile(file)}
               onContextMenu={(e) => handleContextMenu(e, file, 'file')}
             >
+              <button
+                onClick={(event) => { event.stopPropagation(); toggleSelection(file.id); }}
+                className={`absolute top-3 left-3 z-10 rounded-md bg-gray-950/80 p-1 transition-opacity ${selectedIds.has(file.id) ? 'opacity-100 text-cyan-400' : 'opacity-0 text-gray-400 group-hover:opacity-100'}`}
+                aria-label={`Select ${file.original_name}`}
+              >
+                {selectedIds.has(file.id) ? <CheckSquare size={17} /> : <Square size={17} />}
+              </button>
               <div className={`flex items-start justify-between ${viewMode === 'grid' ? 'mb-4' : 'flex-1 items-center gap-4'}`}>
                 <div className={`rounded-xl bg-gray-800 flex items-center justify-center shrink-0 ${viewMode === 'grid' ? 'w-12 h-12' : 'w-10 h-10'}`}>
                   <FileIconDisplay mimeType={file.mime_type} size={viewMode === 'grid' ? 24 : 20} />
@@ -541,7 +621,7 @@ export default function DrivePage() {
       )}
 
       {previewFile && (
-        <FilePreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+        <FilePreviewModal file={previewFile} siblings={files} onSelect={file => setPreviewFile(file as FileItem)} onChanged={loadFiles} onClose={() => setPreviewFile(null)} />
       )}
       {shareFile && (
         <ShareModal file={shareFile} onClose={() => setShareFile(null)} />
@@ -609,39 +689,47 @@ export default function DrivePage() {
         )}
       </AnimatePresence>
 
-      {/* Upload Progress Panel */}
+      {/* Upload Center */}
       <AnimatePresence>
-        {uploading && (
+        {uploadQueue.length > 0 && uploadCenterOpen && (
           <motion.div 
             initial={{ opacity: 0, y: 50, scale: 0.9 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 50, scale: 0.9 }}
-            className="fixed bottom-6 right-6 z-40 bg-gray-900 border border-gray-700 shadow-2xl rounded-xl p-4 min-w-[300px]"
+            className="fixed bottom-6 right-6 z-40 w-[min(420px,calc(100vw-3rem))] bg-gray-900 border border-gray-700 shadow-2xl rounded-2xl overflow-hidden"
           >
-            <div className="flex items-center gap-3 mb-2">
-              {uploadStatus === 'uploading' ? (
-                <>
-                  <div className="animate-spin w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full"></div>
-                  <h4 className="text-white font-medium">Uploading files...</h4>
-                </>
-              ) : (
-                <>
-                  <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px]">✓</div>
-                  <h4 className="text-green-400 font-medium">Upload complete!</h4>
-                </>
-              )}
+            <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+              <div>
+                <h4 className="font-medium text-white">Upload Center</h4>
+                <p className="text-xs text-gray-500">{uploadQueue.filter(task => task.status === 'success').length}/{uploadQueue.length} completed</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {!uploading && <button onClick={() => setUploadQueue([])} className="text-xs text-gray-500 hover:text-white">Clear</button>}
+                <button onClick={() => setUploadCenterOpen(false)} className="p-1 text-gray-500 hover:text-white"><X size={17} /></button>
+              </div>
             </div>
-            <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
-              <motion.div 
-                className={`h-full rounded-full ${uploadStatus === 'success' ? 'bg-green-500' : 'bg-cyan-400'}`}
-                initial={{ width: "0%" }}
-                animate={{ width: uploadStatus === 'success' ? "100%" : "85%" }} 
-                transition={{ duration: uploadStatus === 'success' ? 0.3 : 10, ease: "easeOut" }}
-              />
+            <div className="max-h-72 overflow-y-auto divide-y divide-gray-800">
+              {uploadQueue.map(task => (
+                <div key={task.id} className="px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    {task.status === 'success' ? <CheckCircle2 size={18} className="text-green-400 shrink-0" /> : task.status === 'error' || task.status === 'cancelled' ? <XCircle size={18} className="text-red-400 shrink-0" /> : <CloudUpload size={18} className="text-cyan-400 shrink-0" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex justify-between gap-3 text-sm"><span className="truncate text-gray-200">{task.relativePath || task.file.name}</span><span className="text-gray-500">{task.progress}%</span></div>
+                      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-gray-800"><div className={`h-full transition-all ${task.status === 'error' || task.status === 'cancelled' ? 'bg-red-500' : task.status === 'success' ? 'bg-green-500' : 'bg-cyan-500'}`} style={{ width: `${task.progress}%` }} /></div>
+                      {task.error && <p className="mt-1 text-xs text-red-400 truncate">{task.error}</p>}
+                    </div>
+                    {task.status === 'uploading' && <button onClick={() => cancelUpload(task.id)} className="p-1 text-gray-500 hover:text-red-400" title="Cancel upload"><X size={16} /></button>}
+                    {(task.status === 'error' || task.status === 'cancelled') && <button onClick={() => retryUpload(task)} className="p-1 text-gray-500 hover:text-cyan-400" title="Retry upload"><RotateCcw size={16} /></button>}
+                  </div>
+                </div>
+              ))}
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+      {uploadQueue.length > 0 && !uploadCenterOpen && (
+        <button onClick={() => setUploadCenterOpen(true)} className="fixed bottom-6 right-6 z-40 rounded-full bg-cyan-600 p-3 text-white shadow-xl" title="Open Upload Center"><CloudUpload size={22} /></button>
+      )}
     </div>
   );
 }

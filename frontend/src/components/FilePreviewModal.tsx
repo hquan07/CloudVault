@@ -1,9 +1,9 @@
 'use client';
 
-import { X, Download, AlertCircle, Loader2, FileIcon, History, RotateCcw } from 'lucide-react';
+import { X, Download, AlertCircle, Loader2, FileIcon, History, RotateCcw, Maximize2, Minimize2, Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { fileApi } from '@/lib/api';
+import { fileApi, metaApi } from '@/lib/api';
 import { formatBytes, formatRelative } from '@/lib/utils';
 
 const ReactPlayer = dynamic(() => import('react-player'), { ssr: false }) as any;
@@ -14,14 +14,21 @@ export interface FileItem {
   original_name: string;
   mime_type: string;
   size: number;
+  created_at?: string;
+  updated_at?: string;
+  checksum_sha256?: string;
+  current_version?: number;
 }
 
 interface Props {
   file: FileItem;
   onClose: () => void;
+  siblings?: FileItem[];
+  onSelect?: (file: FileItem) => void;
+  onChanged?: () => void;
 }
 
-export function FilePreviewModal({ file, onClose }: Props) {
+export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onChanged }: Props) {
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -30,6 +37,9 @@ export function FilePreviewModal({ file, onClose }: Props) {
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
+  const [metadata, setMetadata] = useState<FileItem>(file);
+  const [showInfo, setShowInfo] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
     const fetchUrl = async () => {
@@ -56,7 +66,9 @@ export function FilePreviewModal({ file, onClose }: Props) {
         setLoading(false);
       }
     };
+    setLoading(true); setUrl(null); setTextContent(null); setError(''); setMetadata(file);
     fetchUrl();
+    metaApi.getFile(file.id).then(data => setMetadata(data as FileItem)).catch(() => undefined);
   }, [file.id]);
 
   useEffect(() => {
@@ -80,10 +92,9 @@ export function FilePreviewModal({ file, onClose }: Props) {
     setRestoringVersion(versionNumber);
     try {
       await fileApi.restoreVersion(file.id, versionNumber);
-      // After restore, close modal so dashboard refreshes or we could trigger a refresh event
-      onClose();
-      // Alternatively, just refresh the page to see changes
-      window.location.reload();
+      setVersions([]);
+      setShowVersions(false);
+      onChanged?.();
     } catch (err) {
       console.error("Failed to restore", err);
       alert("Failed to restore version");
@@ -109,10 +120,27 @@ export function FilePreviewModal({ file, onClose }: Props) {
     };
   }, []);
 
+  const currentIndex = siblings.findIndex(item => item.id === file.id);
+  const navigate = (direction: number) => {
+    if (!onSelect || currentIndex < 0) return;
+    const next = siblings[currentIndex + direction];
+    if (next) onSelect(next);
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      if (event.key === 'ArrowLeft') navigate(-1);
+      if (event.key === 'ArrowRight') navigate(1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentIndex, siblings, onSelect, onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-5xl h-[85vh] bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+      <div className={`relative w-full bg-gray-900 border border-gray-800 shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 ${fullscreen ? 'h-full max-w-none rounded-none' : 'max-w-6xl h-[88vh] rounded-2xl'}`}>
         
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/50 backdrop-blur-md">
@@ -132,6 +160,8 @@ export function FilePreviewModal({ file, onClose }: Props) {
             >
               <History size={20} />
             </button>
+            <button onClick={() => setShowInfo(!showInfo)} className={`p-2 rounded-lg ${showInfo ? 'bg-cyan-900/50 text-cyan-400' : 'text-gray-400 hover:bg-gray-800'}`} title="File details"><Info size={20} /></button>
+            <button onClick={() => setFullscreen(!fullscreen)} className="p-2 text-gray-400 hover:bg-gray-800 rounded-lg" title="Toggle fullscreen">{fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}</button>
             {url && (
               <a 
                 href={url} 
@@ -155,6 +185,8 @@ export function FilePreviewModal({ file, onClose }: Props) {
         <div className="flex-1 flex overflow-hidden">
           {/* Main Content */}
           <div className="flex-1 overflow-hidden bg-black/40 flex items-center justify-center p-4 relative">
+          {currentIndex > 0 && <button onClick={() => navigate(-1)} className="absolute left-3 top-1/2 z-10 rounded-full bg-gray-900/80 p-2 text-gray-300 hover:text-white"><ChevronLeft /></button>}
+          {currentIndex >= 0 && currentIndex < siblings.length - 1 && <button onClick={() => navigate(1)} className="absolute right-3 top-1/2 z-10 rounded-full bg-gray-900/80 p-2 text-gray-300 hover:text-white"><ChevronRight /></button>}
           {loading ? (
             <div className="flex flex-col items-center text-gray-500">
               <Loader2 className="animate-spin mb-3 text-cyan-500" size={32} />
@@ -268,6 +300,19 @@ export function FilePreviewModal({ file, onClose }: Props) {
                 ))
               )}
             </div>
+          </div>
+        )}
+        {showInfo && !showVersions && (
+          <div className="w-80 border-l border-gray-800 bg-gray-900 p-5 text-sm">
+            <h4 className="font-medium text-gray-200 mb-5">File details</h4>
+            <dl className="space-y-4 text-gray-400">
+              <div><dt className="text-xs uppercase text-gray-600">Type</dt><dd className="mt-1 break-all">{metadata.mime_type || 'Unknown'}</dd></div>
+              <div><dt className="text-xs uppercase text-gray-600">Size</dt><dd className="mt-1">{formatBytes(metadata.size)}</dd></div>
+              <div><dt className="text-xs uppercase text-gray-600">Created</dt><dd className="mt-1">{metadata.created_at ? new Date(metadata.created_at).toLocaleString() : 'Unknown'}</dd></div>
+              <div><dt className="text-xs uppercase text-gray-600">Updated</dt><dd className="mt-1">{metadata.updated_at ? new Date(metadata.updated_at).toLocaleString() : 'Unknown'}</dd></div>
+              <div><dt className="text-xs uppercase text-gray-600">Current version</dt><dd className="mt-1">{metadata.current_version || 1}</dd></div>
+              {metadata.checksum_sha256 && <div><dt className="text-xs uppercase text-gray-600">SHA-256</dt><dd className="mt-1 break-all font-mono text-xs">{metadata.checksum_sha256}</dd></div>}
+            </dl>
           </div>
         )}
       </div>

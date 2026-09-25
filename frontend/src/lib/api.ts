@@ -147,6 +147,47 @@ export const fileApi = {
     return request(`${FILE_BASE}/files/upload`, { method: 'POST', body: formData });
   },
 
+  uploadWithProgress: async (
+    file: File,
+    folderId: string | undefined,
+    relativePath: string | undefined,
+    onProgress: (percent: number) => void,
+    signal?: AbortSignal,
+  ) => {
+    const uploadOnce = () => new Promise<Record<string, unknown>>((resolve, reject) => {
+      const formData = new FormData();
+      formData.append('file', file, file.name);
+      if (folderId) formData.append('folder_id', folderId);
+      if (relativePath) formData.append('relative_path', relativePath);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${FILE_BASE}/files/upload`);
+      const token = getToken();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.onload = () => {
+        const data = JSON.parse(xhr.responseText || '{}');
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new ApiError(data.detail || 'Upload failed', xhr.status, data));
+      };
+      xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
+      xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'));
+      signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+      xhr.send(formData);
+    });
+
+    try {
+      return await uploadOnce();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401 && await refreshAccessToken()) {
+        return uploadOnce();
+      }
+      throw error;
+    }
+  },
+
   download: async (fileId: string) => {
     return request<{ download_url: string }>(`${FILE_BASE}/files/${fileId}/download`);
   },
@@ -211,8 +252,25 @@ export const metaApi = {
 
   getStorage: () => request(`${META_BASE}/metadata/storage`),
 
-  search: (q: string, page = 1, pageSize = 20) =>
-    request(`${META_BASE}/search/?q=${encodeURIComponent(q)}&page=${page}&page_size=${pageSize}`),
+  search: (params: {
+    q: string; page?: number; pageSize?: number; mimeType?: string;
+    minSize?: number; maxSize?: number; dateFrom?: string; dateTo?: string;
+    sortBy?: 'relevance' | 'created_at' | 'updated_at' | 'size' | 'original_name';
+    sortOrder?: 'asc' | 'desc';
+  }) => {
+    const qs = new URLSearchParams();
+    qs.set('q', params.q);
+    qs.set('page', String(params.page || 1));
+    qs.set('page_size', String(params.pageSize || 20));
+    if (params.mimeType) qs.set('mime_type', params.mimeType);
+    if (params.minSize !== undefined) qs.set('min_size', String(params.minSize));
+    if (params.maxSize !== undefined) qs.set('max_size', String(params.maxSize));
+    if (params.dateFrom) qs.set('date_from', params.dateFrom);
+    if (params.dateTo) qs.set('date_to', params.dateTo);
+    if (params.sortBy) qs.set('sort_by', params.sortBy);
+    if (params.sortOrder) qs.set('sort_order', params.sortOrder);
+    return request(`${META_BASE}/search/?${qs.toString()}`);
+  },
 
   suggest: (q: string) =>
     request(`${META_BASE}/search/suggest?q=${encodeURIComponent(q)}`),
