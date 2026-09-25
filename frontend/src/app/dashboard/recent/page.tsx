@@ -55,7 +55,7 @@ export default function RecentPage() {
             <Clock size={32} />
           </div>
           <h3 className="text-xl font-medium text-gray-200 mb-2">No recent files</h3>
-          <p className="text-gray-500 max-w-sm mx-auto mb-6">Files you've recently modified will appear here.</p>
+          <p className="text-gray-500 max-w-sm mx-auto mb-6">Files you&apos;ve recently modified will appear here.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">

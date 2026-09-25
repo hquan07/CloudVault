@@ -383,7 +383,7 @@ export default function DrivePage() {
                 <span>Upload Folder</span>
                 <input 
                   type="file" 
-                  // @ts-ignore
+                  // @ts-expect-error Non-standard directory upload attribute supported by Chromium.
                   webkitdirectory="true"
                   directory="true"
                   multiple

@@ -35,7 +35,13 @@ import redis.asyncio as aioredis
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_admin
+from app.dependencies import (
+    authenticate_token,
+    close_auth_dependencies,
+    get_current_admin,
+    get_current_user,
+    init_auth_dependencies,
+)
 from app.models import User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily, FolderPermission
 
 # ── Elasticsearch & Redis clients ──
@@ -56,13 +62,14 @@ from app.database import async_session
 import json
 import asyncio
 
-audit_consumer_task = None
+notification_consumer_task = None
 
-async def audit_worker():
+async def notification_worker():
+    """Forward domain events to Redis; audit persistence is owned by audit-logger."""
     consumer = AIOKafkaConsumer(
         settings.KAFKA_TOPIC_FILE_EVENTS,
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
-        group_id="audit-logger",
+        group_id="metadata-notifications",
         auto_offset_reset="latest",
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     )
@@ -72,40 +79,30 @@ async def audit_worker():
             data = msg.value
             event = data.get("event")
             user_id = data.get("user_id") or data.get("shared_by")
-            file_id = data.get("file_id") or data.get("folder_id")
-            
             if not event or not user_id:
                 continue
-                
-            async with async_session() as session:
-                log = AuditLog(
-                    user_id=user_id,
-                    action=event,
-                    resource_type="FILE" if "file_id" in data else "FOLDER",
-                    resource_id=file_id or "",
-                    resource_name=data.get("filename") or data.get("folder_name") or "",
-                    details=data
-                )
-                session.add(log)
-                await session.commit()
-                
-                # Push real-time notification via Redis Pub/Sub
-                if redis_client and user_id:
-                    msg_payload = {
-                        "type": "activity",
-                        "action": event,
-                        "resource_name": data.get("filename") or data.get("folder_name") or "",
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    await redis_client.publish(f"notifications:{user_id}", json.dumps(msg_payload))
-    except Exception as e:
-        pass
+
+            if redis_client:
+                msg_payload = {
+                    "type": "activity",
+                    "action": event,
+                    "resource_name": data.get("filename") or data.get("folder_name") or "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                recipients = {user_id}
+                if data.get("shared_with"):
+                    recipients.add(data["shared_with"])
+                for recipient in recipients:
+                    await redis_client.publish(
+                        f"notifications:{recipient}", json.dumps(msg_payload)
+                    )
     finally:
         await consumer.stop()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global es_client, redis_client
+    await init_auth_dependencies()
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     es_client = AsyncElasticsearch(settings.ELASTICSEARCH_URL)
     # Ensure the index exists
@@ -164,15 +161,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass  # ES may not be ready yet; search-indexer will handle it
 
-    global audit_consumer_task
-    audit_consumer_task = asyncio.create_task(audit_worker())
+    global notification_consumer_task
+    notification_consumer_task = asyncio.create_task(notification_worker())
     yield
     if es_client:
         await es_client.close()
     if redis_client:
-        await redis_client.close()
-    if audit_consumer_task:
-        audit_consumer_task.cancel()
+        await redis_client.aclose()
+    await close_auth_dependencies()
+    if notification_consumer_task:
+        notification_consumer_task.cancel()
 
 
 # ── FastAPI App ──
@@ -232,7 +230,8 @@ async def websocket_notifications(websocket: WebSocket, token: str = Query(None)
         await websocket.close(code=1008)
         return
     try:
-        user = await get_current_user(token)
+        async with async_session() as session:
+            user = await authenticate_token(token, session)
     except Exception:
         await websocket.close(code=1008)
         return
@@ -431,13 +430,8 @@ async def get_storage(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Recalculate storage used
-    result = await db.execute(
-        select(func.coalesce(func.sum(File.size), 0)).where(
-            File.user_id == user.id, File.is_deleted == False
-        )
-    )
-    used = result.scalar() or 0
+    # storage_used tracks physical objects, including retained file versions.
+    used = user.storage_used
     return {
         "storage_used": used,
         "storage_quota": user.storage_quota,

@@ -70,12 +70,12 @@ export default function ActivityPage() {
   };
 
   const formatActionText = (log: AuditLog) => {
-    let actionStr = log.action.replace(/_/g, ' ').toLowerCase();
+    const actionStr = log.action.replace(/_/g, ' ').toLowerCase();
     return (
       <span>
         <span className="font-medium text-gray-200 capitalize">{actionStr}</span>
         {' '}the {log.resource_type.toLowerCase()}{' '}
-        {log.resource_name && <span className="font-semibold text-white">"{log.resource_name}"</span>}
+        {log.resource_name && <span className="font-semibold text-white">&quot;{log.resource_name}&quot;</span>}
       </span>
     );
   };

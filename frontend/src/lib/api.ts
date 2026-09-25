@@ -95,7 +95,10 @@ async function refreshAccessToken(): Promise<boolean> {
     });
     if (res.ok) {
       const data = await res.json();
-      setTokens(data.access_token, data.refresh_token || refreshToken);
+      setTokens(
+        data.tokens.access_token,
+        data.tokens.refresh_token || refreshToken
+      );
       return true;
     }
   } catch { /* ignore */ }
@@ -110,7 +113,13 @@ export const authApi = {
   login: (data: { email: string; password: string }) =>
     request(`${AUTH_BASE}/auth/login`, { method: 'POST', body: JSON.stringify(data) }, false),
 
-  logout: () => request(`${AUTH_BASE}/auth/logout`, { method: 'POST' }),
+  logout: () => {
+    const refreshToken = getRefreshToken();
+    return request(`${AUTH_BASE}/auth/logout`, {
+      method: 'POST',
+      body: refreshToken ? JSON.stringify({ refresh_token: refreshToken }) : undefined,
+    });
+  },
 
   getMe: () => request(`${AUTH_BASE}/auth/me`),
 

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
+    MINIO_PUBLIC_ENDPOINT: str = "localhost:9000"
     MINIO_ROOT_USER: str = "cloudvault_admin"
     MINIO_ROOT_PASSWORD: str = "cloudvault_minio_2026"
     MINIO_BUCKET_FILES: str = "cloudvault-files"
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
             f"mysql+asyncmy://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
         )
+
+    @property
+    def redis_url(self) -> str:
+        return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
     class Config:
         env_file = ".env"

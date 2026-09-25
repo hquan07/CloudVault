@@ -194,6 +194,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/v1/auth/logout", response_model=MessageResponse)
 async def logout(
+    req: RefreshRequest | None = None,
     authorization: str = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -209,6 +210,17 @@ async def logout(
                 await blacklist_token(jti, ttl)
         except Exception:
             pass  # Token might already be expired, that's fine
+
+    if req:
+        refresh_hash = hashlib.sha256(req.refresh_token.encode()).hexdigest()
+        result = await db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == refresh_hash)
+        )
+        refresh_token = result.scalar_one_or_none()
+        if refresh_token and not refresh_token.revoked:
+            refresh_token.revoked = True
+            refresh_token.revoked_at = datetime.now(timezone.utc)
+            await db.commit()
     return MessageResponse(detail="Logged out successfully")
 
 
@@ -232,8 +244,8 @@ async def refresh(req: RefreshRequest, db: AsyncSession = Depends(get_db)):
     # Get user
     user_result = await db.execute(select(User).where(User.id == rt.user_id))
     user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
 
     # Revoke old refresh token (rotation)
     rt.revoked = True
@@ -388,4 +400,3 @@ async def update_user_status(
     await db.commit()
     await db.refresh(user)
     return _user_response(user)
-

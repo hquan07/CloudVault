@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { Lock, File as FileIcon, Download, AlertCircle, Loader2 } from 'lucide-react';
 import { shareApi } from '@/lib/api';
 import { formatBytes, formatRelative } from '@/lib/utils';
@@ -90,9 +91,9 @@ export default function ShareAccessPage() {
           </div>
           <h1 className="text-2xl font-bold text-gray-100 mb-2">Link Unavailable</h1>
           <p className="text-gray-400 mb-8">{error}</p>
-          <a href="/" className="inline-block bg-gray-800 hover:bg-gray-700 text-white font-medium py-3 px-8 rounded-xl transition-colors">
+          <Link href="/" className="inline-block bg-gray-800 hover:bg-gray-700 text-white font-medium py-3 px-8 rounded-xl transition-colors">
             Go to CloudVault
-          </a>
+          </Link>
         </div>
       </div>
     );

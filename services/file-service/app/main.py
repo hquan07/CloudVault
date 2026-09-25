@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import jwt as pyjwt
+import redis.asyncio as aioredis
 from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,11 +38,12 @@ from app.models import User, File, Folder, FileVersion
 minio_client: Minio | None = None
 minio_public_client: Minio | None = None
 kafka_producer: AIOKafkaProducer | None = None
+redis_client: aioredis.Redis | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global minio_client, minio_public_client, kafka_producer
+    global minio_client, minio_public_client, kafka_producer, redis_client
 
     # MinIO
     minio_client = Minio(
@@ -53,12 +55,14 @@ async def lifespan(app: FastAPI):
 
     # MinIO Client for presigned URLs (uses public endpoint)
     minio_public_client = Minio(
-        "localhost:9000",
+        settings.MINIO_PUBLIC_ENDPOINT,
         access_key=settings.MINIO_ROOT_USER,
         secret_key=settings.MINIO_ROOT_PASSWORD,
         secure=False,
         region="us-east-1",
     )
+
+    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
 
     # Kafka
     try:
@@ -74,6 +78,8 @@ async def lifespan(app: FastAPI):
 
     if kafka_producer:
         await kafka_producer.stop()
+    if redis_client:
+        await redis_client.aclose()
 
 
 # ── FastAPI App ──
@@ -115,11 +121,18 @@ async def get_current_user(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+
+    jti = payload.get("jti")
+    if jti and redis_client and await redis_client.get(f"blacklist:{jti}"):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+
     user_id = payload.get("sub")
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
     return user
 
 
@@ -178,9 +191,14 @@ async def upload_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Read file content
-    content = await file.read()
-    file_size = len(content)
+    # Determine size and checksum incrementally. UploadFile uses a spooled file,
+    # so this avoids allocating another full-size bytes object in memory.
+    hasher = hashlib.sha256()
+    file_size = 0
+    while chunk := await file.read(1024 * 1024):
+        hasher.update(chunk)
+        file_size += len(chunk)
+    await file.seek(0)
 
     # Check storage quota
     if user.storage_used + file_size > user.storage_quota:
@@ -192,7 +210,7 @@ async def upload_file(
     minio_key = f"{user.id}/{file_id}{f'.{ext}' if ext else ''}"
 
     # Compute checksum
-    checksum = hashlib.sha256(content).hexdigest()
+    checksum = hasher.hexdigest()
 
     # Upload to MinIO
     try:
@@ -200,7 +218,7 @@ async def upload_file(
             minio_client.put_object,
             settings.MINIO_BUCKET_FILES,
             minio_key,
-            io.BytesIO(content),
+            file.file,
             file_size,
             content_type=file.content_type or "application/octet-stream",
         )
@@ -326,8 +344,20 @@ async def verify_file_access(db: AsyncSession, file_id: str, user_id: str, requi
 
     # 3. If file is in a folder, check inherited permissions
     if folder_obj:
-        path_parts = [p for p in folder_obj.path.split('/') if p]
-        folder_ids_to_check = path_parts + [folder_obj.id]
+        # Walk the actual parent chain. Folder.path contains names, not IDs.
+        folder_ids_to_check = [folder_obj.id]
+        parent_id = folder_obj.parent_id
+        visited = set(folder_ids_to_check)
+        while parent_id and parent_id not in visited:
+            visited.add(parent_id)
+            folder_ids_to_check.append(parent_id)
+            parent_row = await db.execute(
+                select(Folder.id, Folder.parent_id).where(Folder.id == parent_id)
+            )
+            parent = parent_row.first()
+            if not parent:
+                break
+            parent_id = parent.parent_id
         
         perm_query = select(FolderPermission).where(
             FolderPermission.folder_id.in_(folder_ids_to_check),
@@ -527,16 +557,38 @@ async def permanent_delete(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    f = await verify_file_access(db, file_id, user.id, "viewer")
+    result = await db.execute(
+        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == True)
+    )
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found in trash")
+
+    versions_result = await db.execute(
+        select(FileVersion).where(FileVersion.file_id == file_id)
+    )
+    versions = versions_result.scalars().all()
+
+    # A restored version may reference an existing object, so count/delete each
+    # physical object only once.
+    stored_objects = {version.minio_key: version.size for version in versions}
+    stored_objects.setdefault(f.minio_key, f.size)
 
     # Delete from MinIO
     try:
-        minio_client.remove_object(f.minio_bucket, f.minio_key)
+        for object_key in stored_objects:
+            await asyncio.to_thread(minio_client.remove_object, f.minio_bucket, object_key)
+        if f.thumbnail_key:
+            await asyncio.to_thread(
+                minio_client.remove_object,
+                settings.MINIO_BUCKET_THUMBNAILS,
+                f.thumbnail_key,
+            )
     except Exception:
         pass
 
     # Update storage
-    user.storage_used = max(0, user.storage_used - f.size)
+    user.storage_used = max(0, user.storage_used - sum(stored_objects.values()))
 
     await db.delete(f)
     await db.commit()

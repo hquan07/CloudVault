@@ -22,7 +22,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/api/v1/metadata/ws/notifications?token=${token}`;
         
-        let ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl);
 
         ws.onmessage = (event) => {
             try {

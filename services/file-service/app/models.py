@@ -22,6 +22,7 @@ class User(Base):
     username = Column(String(100), nullable=False)
     storage_quota = Column(BigInteger, nullable=False, default=5368709120)
     storage_used = Column(BigInteger, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
 
 
 class Folder(Base):

@@ -89,7 +89,7 @@ function SearchResults() {
     <div className="space-y-6">
       <div className="flex items-center gap-4">
         <h1 className="text-2xl font-bold">Search Results</h1>
-        <span className="text-gray-500">for "{q}"</span>
+        <span className="text-gray-500">for &quot;{q}&quot;</span>
       </div>
 
       {error && (

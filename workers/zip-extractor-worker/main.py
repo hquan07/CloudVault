@@ -7,7 +7,9 @@ and uploads individual files back to MinIO.
 import asyncio
 import io
 import json
+import mimetypes
 import os
+import tempfile
 import uuid
 import zipfile
 import logging
@@ -36,6 +38,11 @@ DB_NAME = os.getenv("MYSQL_DATABASE", "cloudvault")
 DB_URL = f"mysql+asyncmy://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 ZIP_MIMES = {"application/zip", "application/x-zip-compressed"}
+MAX_ZIP_ENTRIES = int(os.getenv("MAX_ZIP_ENTRIES", "1000"))
+MAX_ZIP_UNCOMPRESSED_BYTES = int(
+    os.getenv("MAX_ZIP_UNCOMPRESSED_BYTES", str(500 * 1024 * 1024))
+)
+MAX_ZIP_COMPRESSION_RATIO = int(os.getenv("MAX_ZIP_COMPRESSION_RATIO", "200"))
 
 
 async def main():
@@ -78,30 +85,73 @@ async def main():
 
             logger.info(f"Extracting zip: {file_id}")
 
+            resp = None
             try:
                 resp = minio_client.get_object(BUCKET_FILES, minio_key)
-                zip_data = resp.read()
-                resp.close()
+                zip_file = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
+                while chunk := resp.read(1024 * 1024):
+                    zip_file.write(chunk)
+                zip_file.seek(0)
             except Exception as e:
                 logger.error(f"Failed to fetch zip: {e}")
                 continue
+            finally:
+                if resp is not None:
+                    resp.close()
+                    resp.release_conn()
 
+            uploaded_keys = []
             try:
-                with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-                    for info in zf.infolist():
-                        if info.is_dir():
-                            continue
-                        extracted = zf.read(info.filename)
-                        new_id = str(uuid.uuid4())
-                        new_key = f"{user_id}/{new_id}"
-                        minio_client.put_object(
-                            BUCKET_FILES,
-                            new_key,
-                            io.BytesIO(extracted),
-                            length=len(extracted),
-                        )
+                with zipfile.ZipFile(zip_file) as zf:
+                    entries = [info for info in zf.infolist() if not info.is_dir()]
+                    if len(entries) > MAX_ZIP_ENTRIES:
+                        raise ValueError(f"ZIP contains too many files ({len(entries)})")
 
-                        async with session_factory() as session:
+                    total_size = sum(info.file_size for info in entries)
+                    if total_size > MAX_ZIP_UNCOMPRESSED_BYTES:
+                        raise ValueError(f"ZIP expands beyond limit ({total_size} bytes)")
+
+                    for info in entries:
+                        if info.flag_bits & 0x1:
+                            raise ValueError("Encrypted ZIP entries are not supported")
+                        compressed_size = max(info.compress_size, 1)
+                        if (
+                            info.file_size > 10 * 1024 * 1024
+                            and info.file_size / compressed_size > MAX_ZIP_COMPRESSION_RATIO
+                        ):
+                            raise ValueError(f"Suspicious compression ratio: {info.filename}")
+
+                    async with session_factory() as session:
+                        quota_result = await session.execute(
+                            text(
+                                "SELECT storage_used, storage_quota FROM users "
+                                "WHERE id = :uid FOR UPDATE"
+                            ),
+                            {"uid": user_id},
+                        )
+                        quota = quota_result.first()
+                        if not quota:
+                            raise ValueError("ZIP owner no longer exists")
+                        if quota.storage_used + total_size > quota.storage_quota:
+                            raise ValueError("Extracted files would exceed storage quota")
+
+                        for info in entries:
+                            original_name = os.path.basename(info.filename)
+                            if not original_name:
+                                continue
+                            extracted = zf.read(info)
+                            new_id = str(uuid.uuid4())
+                            new_key = f"{user_id}/{new_id}"
+                            mime_type = mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+                            minio_client.put_object(
+                                BUCKET_FILES,
+                                new_key,
+                                io.BytesIO(extracted),
+                                length=len(extracted),
+                                content_type=mime_type,
+                            )
+                            uploaded_keys.append(new_key)
+
                             await session.execute(
                                 text("""
                                     INSERT INTO files (id, filename, original_name, mime_type, size,
@@ -112,22 +162,37 @@ async def main():
                                 {
                                     "id": new_id,
                                     "filename": new_id,
-                                    "original_name": os.path.basename(info.filename),
-                                    "mime_type": "application/octet-stream",
+                                    "original_name": original_name,
+                                    "mime_type": mime_type,
                                     "size": len(extracted),
                                     "user_id": user_id,
                                     "bucket": BUCKET_FILES,
                                     "key": new_key,
                                 },
                             )
-                            await session.commit()
 
-                        logger.info(f"  Extracted: {info.filename} -> {new_id}")
+                            logger.info(f"  Extracted: {info.filename} -> {new_id}")
+
+                        await session.execute(
+                            text(
+                                "UPDATE users SET storage_used = storage_used + :size "
+                                "WHERE id = :uid"
+                            ),
+                            {"size": total_size, "uid": user_id},
+                        )
+                        await session.commit()
 
             except zipfile.BadZipFile:
                 logger.error(f"Invalid zip file: {file_id}")
             except Exception as e:
                 logger.error(f"Extraction failed: {e}")
+                for uploaded_key in uploaded_keys:
+                    try:
+                        minio_client.remove_object(BUCKET_FILES, uploaded_key)
+                    except Exception:
+                        logger.exception("Failed to clean up extracted object %s", uploaded_key)
+            finally:
+                zip_file.close()
 
     finally:
         await consumer.stop()

@@ -190,7 +190,6 @@ export function FilePreviewModal({ file, onClose }: Props) {
               )}
               {isVideo && (
                 <div className="w-full h-full flex items-center justify-center rounded-lg shadow-lg bg-black overflow-hidden">
-                  {/* @ts-ignore */}
                   <ReactPlayer 
                     url={url!} 
                     controls 
