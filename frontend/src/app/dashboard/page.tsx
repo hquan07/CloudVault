@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive, LayoutGrid, List, X, RotateCcw, CheckCircle2, XCircle, Square, CheckSquare } from 'lucide-react';
+import { FolderOpen, File as FileIcon, Download, Trash2, CloudUpload, Share2, Star, ChevronLeft, Plus, UploadCloud, Users, Image as ImageIcon, Video, FileText, Music, FileArchive, LayoutGrid, List, X, RotateCcw, CheckCircle2, XCircle, Square, CheckSquare, AlertTriangle, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { metaApi, fileApi } from '@/lib/api';
 import { formatBytes, formatRelative, getFileIcon } from '@/lib/utils';
@@ -84,6 +84,7 @@ export default function DrivePage() {
   const [shareFolder, setShareFolder] = useState<FolderItem | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
 
   // Drag & Drop / Dropdown states
   const [isDragActive, setIsDragActive] = useState(false);
@@ -225,14 +226,7 @@ export default function DrivePage() {
   };
 
   const handleDelete = async (fileId: string) => {
-    if (!confirm('Move this file to trash?')) return;
-    try {
-      await fileApi.deleteFile(fileId);
-      setFiles(files.filter(f => f.id !== fileId));
-      refreshUser();
-    } catch (err: any) {
-      setError(err.message || 'Delete failed');
-    }
+    setDeleteTargets([fileId]);
   };
 
   const handleToggleStar = async (fileId: string, currentStatus: boolean) => {
@@ -283,17 +277,28 @@ export default function DrivePage() {
   };
 
   const handleBulkDelete = async () => {
-    if (!confirm(`Move ${selectedIds.size} selected file(s) to trash?`)) return;
+    if (selectedIds.size > 0) setDeleteTargets([...selectedIds]);
+  };
+
+  const confirmDelete = async () => {
+    const targets = [...deleteTargets];
+    if (targets.length === 0) return;
     setBulkBusy(true);
+    setError('');
     try {
-      await Promise.all([...selectedIds].map(id => fileApi.deleteFile(id)));
-      setFiles(current => current.filter(file => !selectedIds.has(file.id)));
-      setSelectedIds(new Set());
+      const results = await Promise.allSettled(targets.map(id => fileApi.deleteFile(id)));
+      const deletedIds = new Set(targets.filter((_, index) => results[index].status === 'fulfilled'));
+      setFiles(current => current.filter(file => !deletedIds.has(file.id)));
+      setSelectedIds(current => new Set([...current].filter(id => !deletedIds.has(id))));
+      const failed = results.filter(result => result.status === 'rejected');
+      if (failed.length > 0) {
+        const firstError = (failed[0] as PromiseRejectedResult).reason;
+        setError(`${failed.length} file(s) could not be deleted: ${firstError?.message || 'Unknown error'}`);
+      }
       refreshUser();
-    } catch (err: any) {
-      setError(err.message || 'Failed to delete selected files');
     } finally {
       setBulkBusy(false);
+      setDeleteTargets([]);
     }
   };
 
@@ -628,6 +633,21 @@ export default function DrivePage() {
       )}
       {shareFolder && (
         <ShareFolderModal folder={shareFolder} onClose={() => setShareFolder(null)} />
+      )}
+
+      {deleteTargets.length > 0 && (
+        <div className="fixed inset-0 z-[1100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={() => !bulkBusy && setDeleteTargets([])} />
+          <div role="dialog" aria-modal="true" aria-labelledby="delete-title" className="relative w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 p-6 shadow-2xl">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-500/15 text-red-400"><AlertTriangle size={24} /></div>
+            <h3 id="delete-title" className="text-xl font-semibold text-white">Move to Trash?</h3>
+            <p className="mt-2 text-sm text-gray-400">{deleteTargets.length === 1 ? 'This file' : `${deleteTargets.length} selected files`} will be moved to Trash and can be restored later.</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button disabled={bulkBusy} onClick={() => setDeleteTargets([])} className="rounded-xl bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-200 hover:bg-gray-700 disabled:opacity-50">Cancel</button>
+              <button disabled={bulkBusy} onClick={confirmDelete} className="flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">{bulkBusy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} Move to Trash</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Context Menu */}
