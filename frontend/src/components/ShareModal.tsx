@@ -10,6 +10,22 @@ interface Props {
   onClose: () => void;
 }
 
+interface ShareLinkItem {
+  id: string;
+  token: string;
+  has_password: boolean;
+  expires_at: string | null;
+  max_downloads: number | null;
+  download_count: number;
+  is_active: boolean;
+}
+
+const isLinkActive = (link: ShareLinkItem) => {
+  const expired = Boolean(link.expires_at && new Date(link.expires_at) < new Date());
+  const exhausted = Boolean(link.max_downloads && link.download_count >= link.max_downloads);
+  return link.is_active && !expired && !exhausted;
+};
+
 export function ShareModal({ file, onClose }: Props) {
   const [password, setPassword] = useState('');
   const [expiresInDays, setExpiresInDays] = useState<number | ''>('');
@@ -18,13 +34,15 @@ export function ShareModal({ file, onClose }: Props) {
   const [error, setError] = useState('');
   const [shareLink, setShareLink] = useState('');
   const [copied, setCopied] = useState(false);
-  const [links, setLinks] = useState<any[]>([]);
+  const [links, setLinks] = useState<ShareLinkItem[]>([]);
   const [loadingLinks, setLoadingLinks] = useState(true);
+  const [revokeTarget, setRevokeTarget] = useState<ShareLinkItem | null>(null);
+  const [revoking, setRevoking] = useState(false);
 
   const loadLinks = async () => {
     setLoadingLinks(true);
     try {
-      const data = await shareApi.listFileLinks(file.id) as { links: any[] };
+      const data = await shareApi.listFileLinks(file.id) as { links: ShareLinkItem[] };
       setLinks(data.links || []);
     } catch (err: any) {
       setError(err.message || 'Failed to load existing links');
@@ -63,13 +81,18 @@ export function ShareModal({ file, onClose }: Props) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const revokeLink = async (linkId: string) => {
-    if (!confirm('Revoke this share link? Anyone using it will immediately lose access.')) return;
+  const revokeLink = async () => {
+    if (!revokeTarget) return;
+    setRevoking(true);
+    setError('');
     try {
-      await shareApi.revokeLink(linkId);
-      setLinks(current => current.map(link => link.id === linkId ? { ...link, is_active: false } : link));
+      await shareApi.revokeLink(revokeTarget.id);
+      setLinks(current => current.map(link => link.id === revokeTarget.id ? { ...link, is_active: false } : link));
+      setRevokeTarget(null);
     } catch (err: any) {
       setError(err.message || 'Failed to revoke link');
+    } finally {
+      setRevoking(false);
     }
   };
 
@@ -194,20 +217,34 @@ export function ShareModal({ file, onClose }: Props) {
           )}
 
           <div className="mt-7 border-t border-gray-800 pt-6">
-            <div className="mb-3 flex items-center justify-between"><h4 className="flex items-center gap-2 font-medium text-gray-200"><Link2 size={17} /> Existing links</h4><span className="text-xs text-gray-500">{links.filter(link => link.is_active).length} active</span></div>
+            <div className="mb-3 flex items-center justify-between"><h4 className="flex items-center gap-2 font-medium text-gray-200"><Link2 size={17} /> Existing links</h4><span className="text-xs text-gray-500">{links.filter(isLinkActive).length} active</span></div>
             {loadingLinks ? <div className="py-5 text-center"><Loader2 className="mx-auto animate-spin text-cyan-500" size={20} /></div> : links.length === 0 ? <p className="rounded-xl bg-gray-800/40 p-4 text-center text-sm text-gray-500">No share links yet.</p> : <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
               {links.map(link => {
                 const expired = link.expires_at && new Date(link.expires_at) < new Date();
                 const exhausted = link.max_downloads && link.download_count >= link.max_downloads;
-                const active = link.is_active && !expired && !exhausted;
+                const active = isLinkActive(link);
                 const url = `${window.location.origin}/share/${link.token}`;
                 return <div key={link.id} className="rounded-xl border border-gray-800 bg-gray-950/40 p-3">
-                  <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${active ? 'bg-green-400' : 'bg-gray-600'}`} /><span className={`text-xs font-medium ${active ? 'text-green-400' : 'text-gray-500'}`}>{active ? 'Active' : expired ? 'Expired' : exhausted ? 'Limit reached' : 'Revoked'}</span>{link.has_password && <Lock size={12} className="text-yellow-400" />}</div><p className="mt-1 truncate text-xs text-gray-500">{url}</p><p className="mt-1 text-[11px] text-gray-600">{link.download_count}{link.max_downloads ? ` / ${link.max_downloads}` : ''} downloads · {link.expires_at ? `expires ${new Date(link.expires_at).toLocaleDateString()}` : 'no expiry'}</p></div><button onClick={() => copyToClipboard(url)} className="p-1.5 text-gray-500 hover:text-cyan-400" title="Copy link"><Copy size={15} /></button>{link.is_active && <button onClick={() => revokeLink(link.id)} className="p-1.5 text-gray-500 hover:text-red-400" title="Revoke link"><Trash2 size={15} /></button>}</div>
+                  <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${active ? 'bg-green-400' : 'bg-gray-600'}`} /><span className={`text-xs font-medium ${active ? 'text-green-400' : 'text-gray-500'}`}>{active ? 'Active' : expired ? 'Expired' : exhausted ? 'Limit reached' : 'Revoked'}</span>{link.has_password && <Lock size={12} className="text-yellow-400" />}</div><p className="mt-1 truncate text-xs text-gray-500">{url}</p><p className="mt-1 text-[11px] text-gray-600">{link.download_count}{link.max_downloads ? ` / ${link.max_downloads}` : ''} downloads · {link.expires_at ? `expires ${new Date(link.expires_at).toLocaleDateString()}` : 'no expiry'}</p></div><button onClick={() => copyToClipboard(url)} className="p-1.5 text-gray-500 hover:text-cyan-400" title="Copy link"><Copy size={15} /></button>{link.is_active && <button onClick={() => setRevokeTarget(link)} className="p-1.5 text-gray-500 hover:text-red-400" title="Revoke link"><Trash2 size={15} /></button>}</div>
                 </div>;
               })}
             </div>}
           </div>
         </div>
+
+        {revokeTarget && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm">
+            <div role="dialog" aria-modal="true" aria-labelledby="revoke-link-title" className="w-full rounded-2xl border border-gray-700 bg-gray-900 p-5 shadow-2xl">
+              <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-full bg-red-500/15 text-red-400"><Trash2 size={21} /></div>
+              <h4 id="revoke-link-title" className="text-lg font-semibold text-white">Revoke this link?</h4>
+              <p className="mt-2 text-sm text-gray-400">Anyone using it will immediately lose access. The revoked link will remain visible in your sharing history.</p>
+              <div className="mt-5 flex justify-end gap-3">
+                <button disabled={revoking} onClick={() => setRevokeTarget(null)} className="rounded-xl bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-200 hover:bg-gray-700 disabled:opacity-50">Cancel</button>
+                <button disabled={revoking} onClick={revokeLink} className="flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">{revoking ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} Revoke link</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
