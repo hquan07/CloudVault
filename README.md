@@ -15,8 +15,8 @@ A **production-grade, self-hosted personal cloud storage platform** built with m
 ## ✨ Key Features
 
 ### 🌟 Core Capabilities
-- **Unlimited Object Storage:** Powered by MinIO (S3-compatible) with multi-part chunked upload support for large files.
-- **Enterprise-Grade Security:** JWT-based stateless authentication, bcrypt password hashing, and role-based access.
+- **S3-Compatible Object Storage:** Powered by MinIO with bounded-memory streamed uploads and file version retention.
+- **Layered Authentication:** JWT access/refresh tokens, refresh rotation, Redis-backed revocation checks in every API service, bcrypt password hashing, and role-based access.
 - **Advanced File Sharing:** Generate secure public links with role-based access (View/Edit).
 - **File Versioning:** Automatically tracks versions when files are overwritten, allowing seamless restoration via the UI.
 - **Event-Driven Architecture:** Apache Kafka streams for asynchronous processing (thumbnail generation, indexing, audit logging).
@@ -37,31 +37,46 @@ A **production-grade, self-hosted personal cloud storage platform** built with m
 
 ## 🏗️ Architecture
 
-CloudVault relies on a distributed microservices pattern communicating synchronously via REST APIs and asynchronously via Apache Kafka.
+CloudVault uses synchronous REST/WebSocket paths for user-facing operations and Kafka consumer groups for asynchronous work. Redis is shared by all API services for token-revocation checks and by the notification path for Pub/Sub delivery.
 
-```text
-┌─────────────────────────┐
-│       Frontend          │
-│    React / Next.js      │
-└───────────┬─────────────┘
-            │ HTTP/REST/WS
-            ▼
-┌─────────────────────────┐
-│   API Gateway (Nginx)   │
-│   Rate Limit / Routing  │
-└───────┬───────┬──────┬──┘
-        │       │      │
-        ▼       ▼      ▼
-    ┌──────┐┌──────┐┌──────┐
-    │ Auth ││ File ││ Meta │  ← FastAPI Microservices
-    └───┬──┘└───┬──┘└───┬──┘
-        │       │       │    ┌──────────────────┐
-        ▼       ▼       ▼    │ Thumbnail Worker │
-    ┌──────┐┌──────┐┌──────┐ │ Search Indexer   │ ← Kafka Consumers
-    │MySQL ││MinIO ││Kafka │◄┤ Audit Logger     │
-    │Redis ││      ││  ES  │ │ Zip Extractor    │
-    └──────┘└──────┘└──────┘ └──────────────────┘
+```mermaid
+flowchart TD
+    Browser[Next.js Client] -->|HTTP / WebSocket| Nginx[Nginx Gateway]
+    Nginx --> Auth[Auth Service]
+    Nginx --> File[File Service]
+    Nginx --> Meta[Metadata Service]
+
+    Auth --> MySQL[(MySQL)]
+    File --> MySQL
+    Meta --> MySQL
+    File -->|stream files + versions| MinIO[(MinIO)]
+    Meta -->|search| ES[(Elasticsearch)]
+
+    Auth <-->|revoke/check tokens| Redis[(Redis)]
+    File -->|check revoked tokens| Redis
+    Meta <-->|check tokens + Pub/Sub| Redis
+    Meta -->|notification WebSocket| Browser
+
+    File -->|file-events| Kafka{Kafka}
+    Kafka --> Audit[Audit Logger]
+    Kafka --> Zip[Guarded ZIP Extractor]
+    Kafka --> Thumb[Thumbnail Worker]
+    Kafka --> Search[Search Indexer]
+    Kafka --> Relay[Notification Relay]
+
+    Audit --> MySQL
+    Zip --> MySQL
+    Zip --> MinIO
+    Thumb --> MySQL
+    Thumb --> MinIO
+    Search --> ES
+    Search --> MinIO
+    Thumb --> Redis
+    Search --> Redis
+    Relay --> Redis
 ```
+
+The Audit Logger is the sole owner of audit persistence. The Metadata notification consumer uses a separate Kafka consumer group (`metadata-notifications`) and only relays activity events to Redis, preventing audit and notification workloads from competing for the same messages.
 
 ---
 
@@ -72,7 +87,7 @@ CloudVault relies on a distributed microservices pattern communicating synchrono
 | **Frontend** | Next.js 14, React, TypeScript | UI, Client-side logic, Framer Motion animations |
 | **Backend** | Python, FastAPI, SQLAlchemy | High-performance async microservices |
 | **Database** | MySQL 8.0, asyncmy | Relational data persistence (Users, Metadata, Versions) |
-| **Cache & Pub/Sub**| Redis 7 | JWT blacklisting, WebSockets Real-time Pub/Sub |
+| **Cache & Pub/Sub**| Redis 7 | Cross-service JWT revocation checks and WebSocket notification Pub/Sub |
 | **Object Storage** | MinIO | S3-compatible file and version storage |
 | **Message Broker**| Apache Kafka, Zookeeper | Async event streaming (`file-events`, `user-events`) |
 | **Search Engine** | Elasticsearch 8.11, Kibana | Full-text search and management |
