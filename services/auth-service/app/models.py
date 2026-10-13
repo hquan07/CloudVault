@@ -5,7 +5,7 @@ Maps to the users and refresh_tokens tables defined in 01_schema.sql.
 
 import uuid
 from sqlalchemy import (
-    Column, String, BigInteger, Boolean, Enum, DateTime, func, ForeignKey,
+    Column, String, BigInteger, Boolean, Enum, DateTime, JSON, func, ForeignKey,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -58,3 +58,58 @@ class RefreshToken(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="refresh_tokens")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug = Column(String(63), nullable=False, unique=True, index=True)
+    name = Column(String(120), nullable=False)
+    description = Column(String(1000), nullable=True)
+    status = Column(String(20), nullable=False, default="active")
+    storage_quota = Column(BigInteger, nullable=False)
+    storage_used = Column(BigInteger, nullable=False, default=0)
+    max_file_size = Column(BigInteger, nullable=False)
+    warning_percent = Column(BigInteger, nullable=False, default=80)
+    retention_policy = Column(JSON, nullable=True)
+    created_by = Column(String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    memberships = relationship("ProjectMembership", back_populates="project", cascade="all, delete-orphan")
+    service_accounts = relationship("ServiceAccount", back_populates="project", cascade="all, delete-orphan")
+
+
+class ProjectMembership(Base):
+    __tablename__ = "project_memberships"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(20), nullable=False, default="viewer")
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    project = relationship("Project", back_populates="memberships")
+    user = relationship("User")
+
+
+class ServiceAccount(Base):
+    __tablename__ = "service_accounts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    token_prefix = Column(String(24), nullable=True)
+    token_hash = Column(String(64), nullable=True, unique=True)
+    scopes = Column(JSON, nullable=False, default=list)
+    is_active = Column(Boolean, nullable=False, default=True)
+    expires_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    created_by = Column(String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    project = relationship("Project", back_populates="service_accounts")

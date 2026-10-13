@@ -21,6 +21,23 @@ services:
     networks:
       - cloudvault-network
 
+  mysql-migrate:
+    image: mysql:8.0
+    container_name: cloudvault-mysql-migrate
+    restart: "no"
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    volumes:
+      - ./infrastructure/mysql/migrations:/migrations:ro
+      - ./infrastructure/mysql/run-migrations.sh:/run-migrations.sh:ro
+    entrypoint: ["/bin/sh", "/run-migrations.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
   # CACHE — Redis 7
   redis:
     image: redis:7-alpine
@@ -320,8 +337,8 @@ services:
     volumes:
       - ./services/auth-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -341,8 +358,8 @@ services:
     volumes:
       - ./services/file-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_healthy
       redis:
@@ -364,8 +381,8 @@ services:
     volumes:
       - ./services/metadata-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       elasticsearch-init:

@@ -54,7 +54,7 @@ Với Docker Compose local, giữ mạng riêng `cloudvault-network` hiện có 
 
 Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 
-### Giai đoạn 1 — Mô hình project và migration cơ sở dữ liệu CloudVault
+### Giai đoạn 1 — Mô hình project và migration cơ sở dữ liệu CloudVault ✅
 
 **Công việc**
 

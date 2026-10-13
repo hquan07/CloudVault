@@ -19,17 +19,20 @@ from fastapi import FastAPI, Depends, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
-from app.models import User, RefreshToken
+from app.models import User, RefreshToken, Project, ProjectMembership
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
     UpdateProfileRequest, AuthResponse, MeResponse,
     MessageResponse, UserResponse, TokenPair,
-    AdminStatsResponse,
+    AdminStatsResponse, ProjectCreateRequest, ProjectUpdateRequest,
+    ProjectMembershipRequest, ProjectMembershipRoleRequest,
+    ProjectMembershipResponse, ProjectResponse,
 )
 from app.auth import (
     hash_password, verify_password,
@@ -400,3 +403,258 @@ async def update_user_status(
     await db.commit()
     await db.refresh(user)
     return _user_response(user)
+
+
+# ── Project Routes ──
+
+PROJECT_ROLES = {"viewer", "editor", "admin"}
+PROJECT_STATUSES = {"active", "suspended", "archived"}
+
+
+def _project_response(project: Project, member_role: str | None = None) -> ProjectResponse:
+    return ProjectResponse(
+        id=project.id,
+        slug=project.slug,
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        storage_quota=project.storage_quota,
+        storage_used=project.storage_used,
+        max_file_size=project.max_file_size,
+        warning_percent=project.warning_percent,
+        retention_policy=project.retention_policy,
+        member_role=member_role,
+        created_by=project.created_by,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
+
+
+async def _project_membership(
+    db: AsyncSession,
+    project_id: str,
+    user: User,
+    required_roles: set[str] | None = None,
+) -> tuple[Project, ProjectMembership | None]:
+    project_result = await db.execute(
+        select(Project).where((Project.id == project_id) | (Project.slug == project_id))
+    )
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    membership_result = await db.execute(
+        select(ProjectMembership).where(
+            ProjectMembership.project_id == project.id,
+            ProjectMembership.user_id == user.id,
+        )
+    )
+    membership = membership_result.scalar_one_or_none()
+    if user.role != "admin" and not membership:
+        raise HTTPException(status_code=403, detail="Project access denied")
+    if required_roles and user.role != "admin" and membership.role not in required_roles:
+        raise HTTPException(status_code=403, detail="Project role is insufficient")
+    return project, membership
+
+
+@app.get("/api/v1/projects", response_model=List[ProjectResponse])
+async def list_projects(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user.role == "admin":
+        result = await db.execute(select(Project).order_by(Project.name.asc()))
+        return [_project_response(project, "admin") for project in result.scalars().all()]
+
+    result = await db.execute(
+        select(Project, ProjectMembership.role)
+        .join(ProjectMembership, ProjectMembership.project_id == Project.id)
+        .where(ProjectMembership.user_id == user.id)
+        .order_by(Project.name.asc())
+    )
+    return [_project_response(project, role) for project, role in result.all()]
+
+
+@app.post("/api/v1/projects", response_model=ProjectResponse, status_code=201)
+async def create_project(
+    req: ProjectCreateRequest,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    project = Project(
+        slug=req.slug,
+        name=req.name,
+        description=req.description,
+        storage_quota=req.storage_quota,
+        max_file_size=req.max_file_size,
+        warning_percent=req.warning_percent,
+        retention_policy=req.retention_policy,
+        created_by=admin.id,
+    )
+    db.add(project)
+    try:
+        await db.flush()
+        db.add(ProjectMembership(project_id=project.id, user_id=admin.id, role="admin"))
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Project slug already exists")
+    await db.refresh(project)
+    return _project_response(project, "admin")
+
+
+@app.get("/api/v1/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user)
+    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.put("/api/v1/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    req: ProjectUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user, {"admin"})
+    updates = req.model_dump(exclude_unset=True)
+    if "status" in updates and updates["status"] not in PROJECT_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid project status")
+    if "storage_quota" in updates and updates["storage_quota"] < project.storage_used:
+        raise HTTPException(status_code=409, detail="Quota cannot be lower than storage used")
+    for key, value in updates.items():
+        setattr(project, key, value)
+    await db.commit()
+    await db.refresh(project)
+    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/members",
+    response_model=List[ProjectMembershipResponse],
+)
+async def list_project_members(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user)
+    result = await db.execute(
+        select(ProjectMembership, User)
+        .join(User, User.id == ProjectMembership.user_id)
+        .where(ProjectMembership.project_id == project.id)
+        .order_by(User.username.asc())
+    )
+    return [
+        ProjectMembershipResponse(
+            id=membership.id,
+            project_id=membership.project_id,
+            user_id=membership.user_id,
+            role=membership.role,
+            username=member.username,
+            email=member.email,
+            created_at=membership.created_at,
+        )
+        for membership, member in result.all()
+    ]
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/members",
+    response_model=ProjectMembershipResponse,
+    status_code=201,
+)
+async def add_project_member(
+    project_id: str,
+    req: ProjectMembershipRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    if req.role not in PROJECT_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid project role")
+    member = await db.get(User, req.user_id)
+    if not member or not member.is_active:
+        raise HTTPException(status_code=404, detail="Active user not found")
+    membership = ProjectMembership(project_id=project.id, user_id=member.id, role=req.role)
+    db.add(membership)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="User is already a project member")
+    await db.refresh(membership)
+    return ProjectMembershipResponse(
+        id=membership.id, project_id=project.id, user_id=member.id,
+        role=membership.role, username=member.username, email=member.email,
+        created_at=membership.created_at,
+    )
+
+
+@app.put(
+    "/api/v1/projects/{project_id}/members/{member_id}",
+    response_model=ProjectMembershipResponse,
+)
+async def update_project_member(
+    project_id: str,
+    member_id: str,
+    req: ProjectMembershipRoleRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    if req.role not in PROJECT_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid project role")
+    result = await db.execute(
+        select(ProjectMembership, User)
+        .join(User, User.id == ProjectMembership.user_id)
+        .where(ProjectMembership.id == member_id, ProjectMembership.project_id == project.id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project membership not found")
+    membership, member = row
+    if membership.role == "admin" and req.role != "admin":
+        admin_count = await db.scalar(
+            select(func.count(ProjectMembership.id)).where(
+                ProjectMembership.project_id == project.id,
+                ProjectMembership.role == "admin",
+            )
+        )
+        if admin_count <= 1:
+            raise HTTPException(status_code=409, detail="Project must keep at least one admin")
+    membership.role = req.role
+    await db.commit()
+    await db.refresh(membership)
+    return ProjectMembershipResponse(
+        id=membership.id, project_id=project.id, user_id=member.id,
+        role=membership.role, username=member.username, email=member.email,
+        created_at=membership.created_at,
+    )
+
+
+@app.delete("/api/v1/projects/{project_id}/members/{member_id}", status_code=204)
+async def remove_project_member(
+    project_id: str,
+    member_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    membership = await db.get(ProjectMembership, member_id)
+    if not membership or membership.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Project membership not found")
+    admin_count = await db.scalar(
+        select(func.count(ProjectMembership.id)).where(
+            ProjectMembership.project_id == project.id,
+            ProjectMembership.role == "admin",
+        )
+    )
+    if membership.role == "admin" and admin_count <= 1:
+        raise HTTPException(status_code=409, detail="Project must keep at least one admin")
+    await db.delete(membership)
+    await db.commit()
