@@ -1,7 +1,7 @@
 'use client';
 
 import { X, Download, AlertCircle, Loader2, FileIcon, History, RotateCcw, Maximize2, Minimize2, Info, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { fileApi, metaApi } from '@/lib/api';
 import { formatBytes, formatRelative } from '@/lib/utils';
@@ -26,9 +26,47 @@ interface Props {
   siblings?: FileItem[];
   onSelect?: (file: FileItem) => void;
   onChanged?: () => void;
+  loadBlob?: (file: FileItem) => Promise<Blob>;
+  enableVersions?: boolean;
 }
 
-export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onChanged }: Props) {
+function parseCsv(content: string, maxRows = 200): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+
+  for (let index = 0; index < content.length && rows.length < maxRows; index += 1) {
+    const char = content[index];
+    if (char === '"') {
+      if (quoted && content[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      row.push(field);
+      field = '';
+    } else if (char === '\n' && !quoted) {
+      row.push(field.replace(/\r$/, ''));
+      if (row.some((value) => value.length > 0)) rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += char;
+    }
+  }
+  if (rows.length < maxRows && (field.length > 0 || row.length > 0)) {
+    row.push(field.replace(/\r$/, ''));
+    if (row.some((value) => value.length > 0)) rows.push(row);
+  }
+  return rows;
+}
+
+export function FilePreviewModal({
+  file, onClose, siblings = [], onSelect, onChanged, loadBlob, enableVersions = true,
+}: Props) {
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -42,8 +80,21 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
   const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
+    let objectUrl: string | null = null;
+    let cancelled = false;
     const fetchUrl = async () => {
       try {
+        if (loadBlob) {
+          const blob = await loadBlob(file);
+          if (cancelled) return;
+          objectUrl = URL.createObjectURL(blob);
+          setUrl(objectUrl);
+          if (file.mime_type?.startsWith('text/') || file.mime_type === 'application/json' || file.mime_type === 'application/xml') {
+            const text = await blob.text();
+            if (!cancelled) setTextContent(text);
+          }
+          return;
+        }
         const data = await fileApi.download(file.id);
         if (data.download_url) {
           setUrl(data.download_url);
@@ -63,16 +114,22 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
       } catch (err: any) {
         setError(err.message || 'Failed to load preview');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     setLoading(true); setUrl(null); setTextContent(null); setError(''); setMetadata(file);
-    fetchUrl();
-    metaApi.getFile(file.id).then(data => setMetadata(data as FileItem)).catch(() => undefined);
-  }, [file.id]);
+    void fetchUrl();
+    if (!loadBlob) {
+      metaApi.getFile(file.id).then(data => setMetadata(data as FileItem)).catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [file, loadBlob]);
 
   useEffect(() => {
-    if (showVersions && versions.length === 0) {
+    if (enableVersions && showVersions && versions.length === 0) {
       const fetchVersions = async () => {
         setLoadingVersions(true);
         try {
@@ -86,7 +143,7 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
       };
       fetchVersions();
     }
-  }, [showVersions, file.id, versions.length]);
+  }, [enableVersions, showVersions, file.id, versions.length]);
 
   const handleRestore = async (versionNumber: number) => {
     setRestoringVersion(versionNumber);
@@ -109,6 +166,8 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
   const isAudio = type.startsWith('audio/');
   const isPdf = type === 'application/pdf';
   const isText = type.startsWith('text/') || type === 'application/json' || type === 'application/xml';
+  const isCsv = type === 'text/csv' || file.original_name.toLowerCase().endsWith('.csv');
+  const csvRows = useMemo(() => isCsv && textContent ? parseCsv(textContent) : [], [isCsv, textContent]);
   
   const canPreview = isImage || isVideo || isAudio || isPdf || isText;
 
@@ -153,13 +212,15 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-4">
-            <button 
-              onClick={() => setShowVersions(!showVersions)}
-              className={`p-2 rounded-lg transition-colors ${showVersions ? 'bg-cyan-900/50 text-cyan-400' : 'text-gray-400 hover:text-cyan-400 hover:bg-gray-800'}`}
-              title="Version History"
-            >
-              <History size={20} />
-            </button>
+            {enableVersions && (
+              <button
+                onClick={() => setShowVersions(!showVersions)}
+                className={`p-2 rounded-lg transition-colors ${showVersions ? 'bg-cyan-900/50 text-cyan-400' : 'text-gray-400 hover:text-cyan-400 hover:bg-gray-800'}`}
+                title="Version History"
+              >
+                <History size={20} />
+              </button>
+            )}
             <button onClick={() => setShowInfo(!showInfo)} className={`p-2 rounded-lg ${showInfo ? 'bg-cyan-900/50 text-cyan-400' : 'text-gray-400 hover:bg-gray-800'}`} title="File details"><Info size={20} /></button>
             <button onClick={() => setFullscreen(!fullscreen)} className="p-2 text-gray-400 hover:bg-gray-800 rounded-lg" title="Toggle fullscreen">{fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}</button>
             {url && (
@@ -244,7 +305,24 @@ export function FilePreviewModal({ file, onClose, siblings = [], onSelect, onCha
               {isPdf && (
                 <iframe src={url!} className="w-full h-full rounded-lg bg-white" title={file.original_name} />
               )}
-              {isText && textContent !== null && (
+              {isCsv && csvRows.length > 0 && (
+                <div className="h-full w-full overflow-auto rounded-lg border border-gray-800 bg-gray-950 text-left shadow-inner">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase text-gray-400">
+                      <tr>{csvRows[0].map((cell, index) => <th key={`${cell}-${index}`} className="whitespace-nowrap border-b border-r border-gray-800 px-4 py-3 font-medium last:border-r-0">{cell || `Column ${index + 1}`}</th>)}</tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800 text-gray-300">
+                      {csvRows.slice(1).map((row, rowIndex) => (
+                        <tr key={rowIndex} className="hover:bg-gray-900/70">
+                          {csvRows[0].map((_, cellIndex) => <td key={cellIndex} className="whitespace-nowrap border-r border-gray-800 px-4 py-2.5 last:border-r-0">{row[cellIndex] || '—'}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {csvRows.length >= 200 && <div className="border-t border-gray-800 p-3 text-center text-xs text-amber-300">Preview limited to the first 200 rows.</div>}
+                </div>
+              )}
+              {isText && !isCsv && textContent !== null && (
                 <div className="w-full h-full bg-[#1e1e1e] text-[#d4d4d4] p-6 rounded-lg overflow-auto font-mono text-sm shadow-inner text-left whitespace-pre-wrap">
                   {textContent}
                 </div>

@@ -4,13 +4,14 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import {
-  AlertCircle, ArrowLeft, Check, Copy, Download, File, HardDrive, KeyRound,
+  AlertCircle, ArrowLeft, Check, Copy, Download, Eye, File, HardDrive, KeyRound,
   Loader2, RefreshCw, Shield, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
+import { FilePreviewModal } from '@/components/FilePreviewModal';
 
 type Tab = 'files' | 'members' | 'access' | 'policy';
 
@@ -36,6 +37,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
+  const [previewFile, setPreviewFile] = useState<ProjectFile | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
   const [tab, setTab] = useState<Tab>('files');
@@ -108,6 +110,11 @@ export default function ProjectDetailPage() {
       URL.revokeObjectURL(url);
     } catch (err) { setError(errorMessage(err)); }
   };
+
+  const loadProjectPreview = useCallback(
+    (item: { id: string }) => projectApi.downloadFile(projectId, item.id),
+    [projectId],
+  );
 
   const deleteFile = async (item: ProjectFile) => {
     if (!window.confirm(`Move ${item.original_name} to project trash?`)) return;
@@ -231,7 +238,7 @@ export default function ProjectDetailPage() {
             <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400"><File className="mx-auto mb-3 text-gray-600" size={42} /><p>No files in this project.</p>{!canWrite && <p className="mt-1 text-xs">Your viewer role is read-only.</p>}</div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
-              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><div className="font-medium text-gray-100">{item.original_name}</div><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
+              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
             </div>
           )}
         </section>
@@ -258,6 +265,17 @@ export default function ProjectDetailPage() {
 
       {secret && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"><div className="w-full max-w-xl rounded-2xl border border-cyan-500/30 bg-gray-900 p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h2 className="text-xl font-semibold text-white">Save this token now</h2><p className="mt-1 text-sm text-amber-300">It will not be shown again after this dialog closes.</p></div><button onClick={() => setSecret(null)} className="p-2 text-gray-400"><X size={20} /></button></div><div className="mt-5 rounded-xl border border-gray-700 bg-gray-950 p-4"><div className="mb-2 text-xs text-gray-500">{secret.name}</div><code className="break-all text-sm text-cyan-200">{secret.token}</code></div><div className="mt-5 flex justify-end gap-3"><button onClick={async () => { await navigator.clipboard.writeText(secret.token); setCopied(true); }} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-gray-200">{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? 'Copied' : 'Copy token'}</button><button onClick={() => { setSecret(null); setCopied(false); }} className="rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950">I saved it</button></div></div></div>
+      )}
+
+      {previewFile && (
+        <FilePreviewModal
+          file={previewFile}
+          siblings={files}
+          onSelect={(file) => setPreviewFile(file as ProjectFile)}
+          onClose={() => setPreviewFile(null)}
+          loadBlob={loadProjectPreview}
+          enableVersions={false}
+        />
       )}
     </div>
   );
