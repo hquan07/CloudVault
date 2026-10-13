@@ -69,7 +69,7 @@ Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 - Các thao tác file cá nhân vẫn đi theo cơ chế sở hữu hiện tại.
 - Có thể tạo project và kiểm tra membership; tên folder không thể làm phát sinh quyền truy cập project.
 
-### Giai đoạn 2 — Xác thực máy, File API và tính quota chính xác
+### Giai đoạn 2 — Xác thực máy, File API và tính quota chính xác ✅
 
 **Công việc**
 

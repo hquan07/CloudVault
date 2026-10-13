@@ -36,6 +36,7 @@ EVENT_TO_ACTION = {
     "FILE_RESTORED": "FILE_RESTORED",
     "FILE_MOVED": "FILE_MOVED",
     "FILE_COPIED": "FILE_COPIED",
+    "QUOTA_EXCEEDED": "QUOTA_EXCEEDED",
     "USER_REGISTERED": "USER_REGISTERED",
     "USER_LOGGED_IN": "USER_LOGGED_IN",
     "USER_LOGGED_OUT": "USER_LOGGED_OUT",
@@ -48,6 +49,7 @@ EVENT_TO_RESOURCE = {
     "FILE_RESTORED": "file",
     "FILE_MOVED": "file",
     "FILE_COPIED": "file",
+    "QUOTA_EXCEEDED": "project",
     "USER_REGISTERED": "user",
     "USER_LOGGED_IN": "user",
     "USER_LOGGED_OUT": "user",
@@ -83,12 +85,20 @@ async def main():
             async with session_factory() as session:
                 await session.execute(
                     text("""
-                        INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details_json)
-                        VALUES (:id, :user_id, :action, :resource_type, :resource_id, :details)
+                        INSERT INTO audit_logs (
+                            id, user_id, project_id, service_account_id,
+                            action, resource_type, resource_id, details_json
+                        )
+                        VALUES (
+                            :id, :user_id, :project_id, :service_account_id,
+                            :action, :resource_type, :resource_id, :details
+                        )
                     """),
                     {
                         "id": str(uuid.uuid4()),
                         "user_id": user_id,
+                        "project_id": data.get("project_id"),
+                        "service_account_id": data.get("service_account_id"),
                         "action": action,
                         "resource_type": resource_type,
                         "resource_id": resource_id,

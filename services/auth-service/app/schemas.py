@@ -128,3 +128,35 @@ class ProjectResponse(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+
+
+class ProjectUsageResponse(BaseModel):
+    project_id: str
+    storage_used: int
+    storage_quota: int
+    available_bytes: int
+    percentage: float
+    warning_percent: int
+
+
+class ServiceAccountCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    scopes: list[str] = Field(default_factory=lambda: ["files:create"])
+    expires_at: Optional[datetime] = None
+
+
+class ServiceAccountResponse(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    token_prefix: Optional[str] = None
+    scopes: list[str]
+    is_active: bool
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ServiceAccountIssuedResponse(ServiceAccountResponse):
+    token: str

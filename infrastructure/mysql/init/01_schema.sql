@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS project_uploads (
     file_id CHAR(36),
     idempotency_key VARCHAR(255) NOT NULL,
     checksum_sha256 CHAR(64) NOT NULL,
+    object_key VARCHAR(1024),
     reserved_bytes BIGINT NOT NULL DEFAULT 0,
     status ENUM('PENDING', 'AVAILABLE', 'FAILED') NOT NULL DEFAULT 'PENDING',
     error_code VARCHAR(64),
@@ -278,6 +279,8 @@ CREATE TABLE IF NOT EXISTS shared_links (
 CREATE TABLE IF NOT EXISTS audit_logs (
     id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
     user_id CHAR(36),
+    project_id CHAR(36),
+    service_account_id CHAR(36),
     action ENUM(
         'USER_REGISTERED', 'USER_LOGGED_IN', 'USER_LOGGED_OUT', 'USER_UPDATED',
         'FILE_UPLOADED', 'FILE_DOWNLOADED', 'FILE_DELETED', 'FILE_RESTORED',
@@ -294,11 +297,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
     INDEX idx_audit_user (user_id),
+    INDEX idx_audit_project (project_id),
+    INDEX idx_audit_service_account (service_account_id),
     INDEX idx_audit_action (action),
     INDEX idx_audit_resource (resource_type, resource_id),
     INDEX idx_audit_created (created_at),
     CONSTRAINT fk_audit_user FOREIGN KEY (user_id) 
-        REFERENCES users(id) ON DELETE SET NULL
+        REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_audit_project FOREIGN KEY (project_id)
+        REFERENCES projects(id) ON DELETE SET NULL,
+    CONSTRAINT fk_audit_service_account FOREIGN KEY (service_account_id)
+        REFERENCES service_accounts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

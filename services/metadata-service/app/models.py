@@ -160,6 +160,7 @@ class ProjectUpload(Base):
     file_id = Column(String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True)
     idempotency_key = Column(String(255), nullable=False)
     checksum_sha256 = Column(String(64), nullable=False)
+    object_key = Column(String(1024), nullable=True)
     reserved_bytes = Column(BigInteger, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="PENDING")
     error_code = Column(String(64), nullable=True)
@@ -190,6 +191,8 @@ class AuditLog(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    service_account_id = Column(String(36), ForeignKey("service_accounts.id", ondelete="SET NULL"), nullable=True)
     action = Column(String(50), nullable=False)
     resource_type = Column(String(20), nullable=False)
     resource_id = Column(String(36), nullable=True)

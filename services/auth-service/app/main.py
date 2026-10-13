@@ -25,20 +25,21 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
-from app.models import User, RefreshToken, Project, ProjectMembership
+from app.models import User, RefreshToken, Project, ProjectMembership, ServiceAccount
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
     UpdateProfileRequest, AuthResponse, MeResponse,
     MessageResponse, UserResponse, TokenPair,
     AdminStatsResponse, ProjectCreateRequest, ProjectUpdateRequest,
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
-    ProjectMembershipResponse, ProjectResponse,
+    ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
+    ServiceAccountCreateRequest, ServiceAccountResponse, ServiceAccountIssuedResponse,
 )
 from app.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
     decode_access_token, blacklist_token, is_token_blacklisted,
-    init_redis, close_redis,
+    init_redis, close_redis, create_service_token,
 )
 from typing import List
 from pydantic import BaseModel
@@ -409,6 +410,7 @@ async def update_user_status(
 
 PROJECT_ROLES = {"viewer", "editor", "admin"}
 PROJECT_STATUSES = {"active", "suspended", "archived"}
+SERVICE_ACCOUNT_SCOPES = {"files:create", "files:read", "files:delete", "project:usage:read"}
 
 
 def _project_response(project: Project, member_role: str | None = None) -> ProjectResponse:
@@ -511,6 +513,25 @@ async def get_project(
 ):
     project, membership = await _project_membership(db, project_id, user)
     return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.get("/api/v1/projects/{project_id}/usage", response_model=ProjectUsageResponse)
+async def get_project_usage(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user)
+    available = max(0, project.storage_quota - project.storage_used)
+    percentage = round((project.storage_used / project.storage_quota * 100), 2) if project.storage_quota else 0
+    return ProjectUsageResponse(
+        project_id=project.id,
+        storage_used=project.storage_used,
+        storage_quota=project.storage_quota,
+        available_bytes=available,
+        percentage=percentage,
+        warning_percent=project.warning_percent,
+    )
 
 
 @app.put("/api/v1/projects/{project_id}", response_model=ProjectResponse)
@@ -657,4 +678,127 @@ async def remove_project_member(
     if membership.role == "admin" and admin_count <= 1:
         raise HTTPException(status_code=409, detail="Project must keep at least one admin")
     await db.delete(membership)
+    await db.commit()
+
+
+def _service_account_response(account: ServiceAccount) -> ServiceAccountResponse:
+    return ServiceAccountResponse(
+        id=account.id,
+        project_id=account.project_id,
+        name=account.name,
+        token_prefix=account.token_prefix,
+        scopes=account.scopes or [],
+        is_active=account.is_active,
+        expires_at=account.expires_at,
+        last_used_at=account.last_used_at,
+        revoked_at=account.revoked_at,
+        created_at=account.created_at,
+    )
+
+
+def _validate_service_account_request(req: ServiceAccountCreateRequest) -> None:
+    invalid = set(req.scopes) - SERVICE_ACCOUNT_SCOPES
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid scopes: {', '.join(sorted(invalid))}")
+    if not req.scopes:
+        raise HTTPException(status_code=400, detail="At least one scope is required")
+    if req.expires_at:
+        expires_at = req.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="expires_at must be in the future")
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/service-accounts",
+    response_model=List[ServiceAccountResponse],
+)
+async def list_service_accounts(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    result = await db.execute(
+        select(ServiceAccount)
+        .where(ServiceAccount.project_id == project.id)
+        .order_by(ServiceAccount.created_at.desc())
+    )
+    return [_service_account_response(account) for account in result.scalars().all()]
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/service-accounts",
+    response_model=ServiceAccountIssuedResponse,
+    status_code=201,
+)
+async def create_service_account(
+    project_id: str,
+    req: ServiceAccountCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    _validate_service_account_request(req)
+    raw_token, prefix, token_hash = create_service_token()
+    account = ServiceAccount(
+        project_id=project.id,
+        name=req.name,
+        token_prefix=prefix,
+        token_hash=token_hash,
+        scopes=sorted(set(req.scopes)),
+        expires_at=req.expires_at,
+        created_by=user.id,
+    )
+    db.add(account)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Service account name already exists")
+    await db.refresh(account)
+    response = _service_account_response(account).model_dump()
+    return ServiceAccountIssuedResponse(**response, token=raw_token)
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/service-accounts/{account_id}/rotate",
+    response_model=ServiceAccountIssuedResponse,
+)
+async def rotate_service_account(
+    project_id: str,
+    account_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    account = await db.get(ServiceAccount, account_id)
+    if not account or account.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Service account not found")
+    raw_token, prefix, token_hash = create_service_token()
+    account.token_prefix = prefix
+    account.token_hash = token_hash
+    account.is_active = True
+    account.revoked_at = None
+    await db.commit()
+    await db.refresh(account)
+    response = _service_account_response(account).model_dump()
+    return ServiceAccountIssuedResponse(**response, token=raw_token)
+
+
+@app.delete("/api/v1/projects/{project_id}/service-accounts/{account_id}", status_code=204)
+async def revoke_service_account(
+    project_id: str,
+    account_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    account = await db.get(ServiceAccount, account_id)
+    if not account or account.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Service account not found")
+    account.is_active = False
+    account.token_hash = None
+    account.revoked_at = datetime.now(timezone.utc)
     await db.commit()

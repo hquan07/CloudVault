@@ -22,6 +22,7 @@ class User(Base):
     username = Column(String(100), nullable=False)
     storage_quota = Column(BigInteger, nullable=False, default=5368709120)
     storage_used = Column(BigInteger, nullable=False, default=0)
+    role = Column(String(50), nullable=False, default="user")
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -145,6 +146,7 @@ class ProjectUpload(Base):
     file_id = Column(String(36), ForeignKey("files.id", ondelete="SET NULL"), nullable=True)
     idempotency_key = Column(String(255), nullable=False)
     checksum_sha256 = Column(String(64), nullable=False)
+    object_key = Column(String(1024), nullable=True)
     reserved_bytes = Column(BigInteger, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="PENDING")
     error_code = Column(String(64), nullable=True)
