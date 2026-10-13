@@ -186,6 +186,9 @@ def _file_to_dict(f: File) -> dict:
 def _project_file_to_dict(f: File) -> dict:
     return {
         "id": f.id,
+        # Stable integration contract for machine clients. Keep ``id`` for
+        # backwards compatibility with the existing web application.
+        "file_id": f.id,
         "project_id": f.project_id,
         "original_name": f.original_name,
         "mime_type": f.mime_type,

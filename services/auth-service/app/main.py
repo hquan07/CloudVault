@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models import User, RefreshToken, Project, ProjectMembership, ServiceAccount
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
@@ -47,9 +47,27 @@ from pydantic import BaseModel
 
 # ── Lifespan ──
 
+def _is_bootstrap_admin(email: str) -> bool:
+    configured = settings.BOOTSTRAP_ADMIN_EMAIL.strip().lower()
+    return bool(configured) and email.strip().lower() == configured
+
+
+async def _reconcile_bootstrap_admin() -> None:
+    """Promote an existing configured bootstrap account idempotently."""
+    configured = settings.BOOTSTRAP_ADMIN_EMAIL.strip().lower()
+    if not configured:
+        return
+    async with async_session() as db:
+        result = await db.execute(select(User).where(func.lower(User.email) == configured))
+        user = result.scalar_one_or_none()
+        if user and user.role != "admin":
+            user.role = "admin"
+            await db.commit()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_redis()
+    await _reconcile_bootstrap_admin()
     yield
     await close_redis()
 
@@ -140,6 +158,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=req.email,
         username=req.username,
         password_hash=hash_password(req.password),
+        role="admin" if _is_bootstrap_admin(req.email) else "user",
         is_verified=True,
     )
     db.add(user)
