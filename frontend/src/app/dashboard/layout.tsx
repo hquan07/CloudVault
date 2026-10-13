@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, Bell } from 'lucide-react';
+import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, Bell, FolderKanban } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -58,6 +58,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const navItems = [
     { name: 'My Files', path: '/dashboard', icon: Folder },
+    { name: 'Projects', path: '/dashboard/projects', icon: FolderKanban },
     { name: 'Shared with me', path: '/dashboard/shared-with-me', icon: Users },
     { name: 'Recent', path: '/dashboard/recent', icon: Clock },
     { name: 'Starred', path: '/dashboard/starred', icon: Star },
@@ -86,7 +87,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         
         <nav className="flex-1 overflow-y-auto py-6 px-4 space-y-1.5">
           {navItems.map((item) => {
-            const isActive = pathname === item.path;
+            const isActive = pathname === item.path || (
+              item.path !== '/dashboard' && pathname.startsWith(`${item.path}/`)
+            );
             const Icon = item.icon;
             return (
               <Link

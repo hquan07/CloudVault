@@ -87,7 +87,7 @@ Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 - Upload đồng thời không âm thầm vượt quota; upload bị ngắt không chiếm quota vĩnh viễn.
 - Upload/download chỉ dùng CloudVault API và trả về `file_id` ổn định.
 
-### Giai đoạn 3 — Giao diện Projects
+### Giai đoạn 3 — Giao diện Projects ✅
 
 **Công việc**
 
