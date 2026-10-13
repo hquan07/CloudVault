@@ -1,6 +1,6 @@
 # Tích hợp Projects với CloudVault — Lộ trình triển khai
 
-**Trạng thái:** Kế hoạch triển khai; các chức năng được đề xuất trong tài liệu này chưa được mặc định là đã có.  
+**Trạng thái:** Đang triển khai; Giai đoạn 0–4 đã hoàn tất, các giai đoạn pilot 5–8 chưa được mặc định là đã có.
 **Phạm vi:** CloudVault cùng `ecommerce-data-platform`, `News_Flow` và `Real-Time_Stock_Prediction_Pipeline`.  
 **Nguyên tắc dung lượng:** CloudVault còn hạn chế dung lượng. Chỉ lưu các sản phẩm đầu ra đã chọn lọc, có giá trị sử dụng; không chuyển toàn bộ dữ liệu làm việc của từng dự án.
 
@@ -102,7 +102,7 @@ Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 - Người dùng phân biệt được dữ liệu cá nhân với dữ liệu project và xem đúng usage.
 - Việc chọn project trên giao diện không thay thế phân quyền backend.
 
-### Giai đoạn 4 — Kết nối Compose local và hợp đồng client
+### Giai đoạn 4 — Kết nối Compose local và hợp đồng client ✅
 
 **Công việc**
 
@@ -116,6 +116,12 @@ Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 
 - Container client phân giải DNS và truy cập gateway.
 - Database và MinIO của CloudVault không thể được client truy cập trực tiếp; chỉ gọi được API CloudVault.
+
+Hợp đồng client, ranh giới mạng và lệnh kiểm tra local đã được ghi tại
+[PHASE_4_LOCAL_CLIENT_CONTRACT.md](PHASE_4_LOCAL_CLIENT_CONTRACT.md). Ba repo đã
+có wrapper project-scoped và chỉ uploader được khai báo tham gia
+`cloudvault-shared`; việc gọi wrapper từ pipeline artifact thật thuộc các giai
+đoạn 5–7.
 
 ### Giai đoạn 5 — Pilot: báo cáo E-commerce
 

@@ -311,7 +311,10 @@ services:
       - redis
       - frontend
     networks:
-      - cloudvault-network
+      cloudvault-network:
+      cloudvault-shared:
+        aliases:
+          - cloudvault-api
 
   # FRONTEND SERVICE
   frontend:
@@ -481,3 +484,6 @@ networks:
   cloudvault-network:
     driver: bridge
     name: cloudvault-network
+  cloudvault-shared:
+    external: true
+    name: cloudvault-shared

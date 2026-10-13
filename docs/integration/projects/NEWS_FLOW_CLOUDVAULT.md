@@ -2,7 +2,7 @@
 
 **Repo đích:** `News_Flow`  
 **CloudVault project ID:** `news-flow`  
-**Trạng thái:** Hướng dẫn tích hợp; cần triển khai CloudVault API dành cho máy/project trước khi bật client.
+**Trạng thái:** Network và client contract Giai đoạn 4 đã triển khai; chưa bật export/archive của Giai đoạn 6.
 
 ## Mục đích và ranh giới
 
@@ -57,6 +57,10 @@ networks:
 Đây là phác thảo thay đổi; cần xác nhận service Compose nào thực sự chạy Scrapy trong stack hiện tại. Dùng alias gateway trong Docker, không dùng `localhost`. Không nối crawler vào network riêng của CloudVault hoặc MinIO.
 
 ### N3 — Thêm client upload và chọn dữ liệu archive
+
+Wrapper đã được thêm tại `integrations/cloudvault.py` trong repo News_Flow và
+được mount read-only vào `airflow-scheduler`. Wrapper cố định project
+`news-flow`; chưa được gọi từ DAG report hoặc crawler trong giai đoạn này.
 
 Thêm client wrapper News_Flow có timeout/retry giới hạn, SHA-256, idempotency ổn định và log an toàn. Chọn raw HTML trước khi upload bằng hàm policy rõ ràng, ví dụ allowlist source + kích thước nội dung + tiêu chí freshness/importance. Giữ khả năng archive MinIO local trong giai đoạn chuyển đổi và rollback.
 

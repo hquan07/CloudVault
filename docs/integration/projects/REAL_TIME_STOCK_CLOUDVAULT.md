@@ -2,7 +2,7 @@
 
 **Repo đích:** `Real-Time_Stock_Prediction_Pipeline`  
 **CloudVault project ID:** `real-time-stock`  
-**Trạng thái:** Hướng dẫn tích hợp; cần triển khai CloudVault API dành cho máy/project trước khi bật client.
+**Trạng thái:** Network và client contract Giai đoạn 4 đã triển khai; chưa bật publish model/report của Giai đoạn 7.
 
 ## Mục đích và ranh giới
 
@@ -58,6 +58,10 @@ networks:
 Đây là phác thảo; cần xác nhận thành phần Airflow nào thực sự thực thi training task và dùng chung đường dẫn artifact. Chỉ cấp network cho nơi cần thiết. Dùng alias gateway CloudVault, không dùng `localhost`. Không cấp credential MinIO cho project Stock.
 
 ### S3 — Publish model version đã kiểm định
+
+Wrapper dùng chung đã được thêm tại `integrations/cloudvault.py` trong repo
+Stock và được mount read-only vào `airflow-scheduler`. Wrapper cố định project
+`real-time-stock`; việc gọi nó sau validation thuộc Giai đoạn 7.
 
 1. Để `ModelRegistry.save_model` ghi version vào thư mục local như hiện tại.
 2. Chạy validation và lưu kết quả. Chỉ upload nếu validation đạt.

@@ -2,7 +2,7 @@
 
 **Repo đích:** `ecommerce-data-platform`  
 **CloudVault project ID:** `ecommerce`  
-**Trạng thái:** Hướng dẫn tích hợp; cần triển khai CloudVault API dành cho máy/project trước khi bật client.
+**Trạng thái:** Network và client contract Giai đoạn 4 đã triển khai; chưa bật upload report của Giai đoạn 5.
 
 ## Mục đích và ranh giới
 
@@ -58,6 +58,10 @@ networks:
 Đây là ví dụ thay đổi; giữ nguyên cấu hình service hiện tại và chỉ gắn đúng uploader. Trong container, dùng alias Docker ổn định của gateway, ví dụ `http://cloudvault-api`; `localhost` không trỏ đến container khác. Gateway CloudVault tham gia shared network, còn MinIO và MySQL vẫn ở mạng riêng.
 
 ### E3 — Thêm client wrapper nhỏ
+
+Wrapper đã được thêm tại `integrations/cloudvault.py` trong repo E-commerce và
+được mount read-only vào container `airflow`. Wrapper cố định project
+`ecommerce`; token tiếp tục được nạp từ `.env`/secret local.
 
 Thêm một module client dùng lại trong E-commerce để:
 
