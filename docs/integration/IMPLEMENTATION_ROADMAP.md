@@ -6,9 +6,12 @@
 
 ## 1. Hiện trạng
 
-CloudVault hiện có tài khoản người dùng, quota và dung lượng đã dùng theo người dùng, folder, file, lưu trữ qua MinIO, quản lý phiên bản và giao diện web. File API hiện xác thực bằng JWT người dùng. Schema hiện gắn file và folder với `user_id`; chưa có quyền sở hữu theo project, thành viên project, service account cho ứng dụng hoặc quota riêng cho project. Giao diện hiện tập trung vào file và folder cá nhân.
-
-Vì vậy, thiết kế tích hợp cần bổ sung project thành một ranh giới quyền hạn và quota thực sự, không chỉ là folder mang tên ứng dụng. Nội dung cá nhân và các endpoint hiện hữu cần tiếp tục hoạt động.
+Trước đợt nâng cấp, CloudVault chỉ có vùng file/folder cá nhân, File API xác thực
+bằng JWT người dùng và schema gắn nội dung với `user_id`. Sau Giai đoạn 1–8, hệ
+thống đã có project như một ranh giới quyền hạn và quota thực sự: thành viên,
+service account, file/folder theo project, giao diện Projects, audit, vận hành,
+backup và khôi phục. Vùng **My Files** và các endpoint cá nhân vẫn hoạt động độc
+lập để giữ tương thích.
 
 Ba dự án hiện có kiểu lưu trữ khác nhau:
 
@@ -119,11 +122,11 @@ Hợp đồng MVP đã chốt tại [PHASE_0_CONTRACT.md](PHASE_0_CONTRACT.md).
 
 Hợp đồng client, ranh giới mạng và lệnh kiểm tra local đã được ghi tại
 [PHASE_4_LOCAL_CLIENT_CONTRACT.md](PHASE_4_LOCAL_CLIENT_CONTRACT.md). Ba repo đã
-có wrapper project-scoped và chỉ uploader được khai báo tham gia
-`cloudvault-shared`; việc gọi wrapper từ pipeline artifact thật thuộc các giai
+có wrapper project-scoped, chỉ uploader được khai báo tham gia
+`cloudvault-shared`, và các pipeline artifact thật đã được kết nối ở các giai
 đoạn 5–7.
 
-### Giai đoạn 5 — Pilot: báo cáo E-commerce
+### Giai đoạn 5 — Pilot: báo cáo E-commerce ✅
 
 **Công việc**
 
@@ -137,7 +140,7 @@ có wrapper project-scoped và chỉ uploader được khai báo tham gia
 - Một báo cáo xuất hiện trong Projects → E-commerce, tải được qua CloudVault và được liên kết bằng `file_id` từ client.
 - Chạy lại cùng logical date không tạo bản trùng ngoài ý muốn.
 
-### Giai đoạn 6 — Tích hợp News_Flow
+### Giai đoạn 6 — Tích hợp News_Flow ✅
 
 **Công việc**
 
@@ -151,7 +154,7 @@ có wrapper project-scoped và chỉ uploader được khai báo tham gia
 - Export theo lịch chỉ được upload một lần mỗi logical run và giữ đúng quyền owner/project của News_Flow.
 - HTML được chọn tuân theo retention/quota; có thể tắt upload CloudVault mà không làm hỏng crawler thông thường.
 
-### Giai đoạn 7 — Tích hợp Real-Time Stock
+### Giai đoạn 7 — Tích hợp Real-Time Stock ✅
 
 **Công việc**
 
