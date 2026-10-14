@@ -1,198 +1,263 @@
-# ☁️ CloudVault — Modern Personal Cloud Storage Platform
+# ☁️ CloudVault — Self-Hosted Personal & Project Storage
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688.svg)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-16.2.6-black.svg)](https://nextjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A **production-grade, self-hosted personal cloud storage platform** built with microservices architecture, event-driven design, and modern DevOps practices. Designed to be a scalable, open-source alternative to Google Drive or Dropbox.
+CloudVault is a self-hosted storage platform for personal files and isolated
+project artifacts. It combines a Next.js interface, FastAPI microservices,
+MinIO object storage, event-driven workers, project-scoped machine credentials,
+and an operations plane for quota and object-integrity monitoring.
 
-> **Current Status**: ✅ Core features, UI/UX, infrastructure secret enforcement, private data-service networking, and authenticated Elasticsearch are enabled in the Docker Compose stack.
+> **Current status:** Personal storage and Project Storage phases 0–8 are
+> implemented in the Docker Compose stack. Automatic retention/deletion remains
+> opt-in and should be enabled gradually after backup and restore validation.
 
 ---
 
 ## ✨ Key Features
 
-### 🌟 Core Capabilities
-- **S3-Compatible Object Storage:** Powered by MinIO with bounded-memory streamed uploads and file version retention.
-- **Layered Authentication:** JWT access/refresh tokens, refresh rotation, Redis-backed revocation checks in every API service, bcrypt password hashing, and role-based access.
-- **Advanced File Sharing:** Generate secure public links with role-based access (View/Edit).
-- **File Versioning:** Automatically tracks versions when files are overwritten, allowing seamless restoration via the UI.
-- **Event-Driven Architecture:** Apache Kafka streams for asynchronous processing (thumbnail generation, indexing, audit logging).
-- **Blazing Fast Search:** Elasticsearch integration with edge n-gram analysis for instant full-text search.
+### Personal storage
 
-### ✨ Premium UI/UX
-- **In-App File Preview:** Instantly preview Images, Videos, and Audio without downloading.
-- **Dynamic Views & Layouts:** Toggle between Grid and List views with beautiful, buttery-smooth Framer Motion crossfade animations.
-- **Smart Drag & Drop:** Dropzone overlays for intuitive recursive folder uploads.
-- **Real-Time Notifications:** WebSockets + Redis Pub/Sub deliver instant toast notifications for background events (e.g., file shared, upload completed).
-- **Rich Visuals:** Empty state illustrations, dynamic file type icons, and dark-mode glassmorphism design.
+- Streamed S3-compatible uploads to MinIO with file-version retention.
+- Personal folders, starred files, trash, sharing links and storage quota.
+- JWT access/refresh tokens, refresh rotation and Redis-backed revocation.
+- Full-text search through authenticated Elasticsearch.
+- In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
+- Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events
+  and real-time Redis/WebSocket notifications.
 
-### 🚀 Admin & Analytics
-- **Admin Statistics Dashboard:** Real-time system monitoring with interactive Recharts (File Type Distribution, Upload Trends, Top Users).
-- **Comprehensive Audit Trail:** Real-time logging of all user and file activities for security and compliance.
+### Project Storage
+
+- Projects are isolated authorization and quota boundaries, separate from
+  **My Files**.
+- Project members use `viewer`, `editor` and `admin` roles.
+- Applications authenticate with one-time-issued `cvp_` service tokens and
+  least-privilege scopes such as `files:create` and `files:read`.
+- Project uploads use stable idempotency keys, SHA-256 checksums and atomic quota
+  reservation.
+- Project folders, filters, per-user stars, bulk actions, preview, trash,
+  archive/restore and audited lifecycle controls are available in the UI.
+- E-commerce, News_Flow and Real-Time Stock clients connect through the shared
+  gateway network without receiving direct MySQL or MinIO credentials.
+
+### Operations and observability
+
+- `project-operations` reconciles recorded usage, metadata and MinIO objects;
+  detects stale uploads, missing/orphan objects and expired files.
+- Prometheus metrics, Grafana dashboard and Alertmanager rules cover project
+  quota, integrity and operation health.
+- OpenTelemetry traces from the API services are exported to Jaeger.
+- Backup, verification, restore-drill and selective project-recovery scripts are
+  provided under `scripts/operations/`.
 
 ---
 
 ## 🏗️ Architecture
 
-CloudVault uses synchronous REST/WebSocket paths for user-facing operations and Kafka consumer groups for asynchronous work. Redis is shared by all API services for token-revocation checks and by the notification path for Pub/Sub delivery.
+CloudVault exposes one gateway to browsers and project clients. Internal data
+services remain on `cloudvault-network`; only Nginx also joins the external
+`cloudvault-shared` network under the alias `cloudvault-api`.
 
 ```mermaid
 flowchart TD
-    Browser[Next.js Client] -->|HTTP / WebSocket| Nginx[Nginx Gateway<br/>Public host entry point]
-    Nginx --> Auth[Auth Service]
-    Nginx --> File[File Service]
-    Nginx --> Meta[Metadata Service]
+    Browser[Browser] -->|UI, REST, WebSocket| Gateway[Nginx Gateway]
+    Clients[E-commerce / News_Flow / Real-Time Stock] -->|Bearer cvp_ token| Shared[cloudvault-shared]
+    Shared -->|cloudvault-api| Gateway
+
+    Gateway --> Frontend[Next.js Frontend]
+    Gateway --> Auth[Auth Service]
+    Gateway --> Files[File Service]
+    Gateway --> Metadata[Metadata Service]
 
     Auth --> MySQL[(MySQL)]
-    File --> MySQL
-    Meta --> MySQL
-    File -->|stream files + versions| MinIO[(MinIO)]
-    Meta -->|authenticated search| ES[(Elasticsearch<br/>Docker-internal only)]
+    Auth <-->|token revocation| Redis[(Redis)]
+    Files --> MySQL
+    Files -->|objects and versions| MinIO[(MinIO)]
+    Files --> Kafka{Kafka}
+    Files --> Redis
+    Metadata --> MySQL
+    Metadata --> ES[(Elasticsearch)]
+    Metadata <-->|Pub/Sub and revocation| Redis
 
-    Auth <-->|revoke/check tokens| Redis[(Redis)]
-    File -->|check revoked tokens| Redis
-    Meta <-->|check tokens + Pub/Sub| Redis
-    Meta -->|notification WebSocket| Browser
-
-    File -->|file-events| Kafka{Kafka}
-    Ops[Project Operations] --> MySQL
-    Ops --> MinIO
-    Prometheus --> Ops
-    Prometheus --> Alertmanager
     Kafka --> Audit[Audit Logger]
     Kafka --> Zip[Guarded ZIP Extractor]
     Kafka --> Thumb[Thumbnail Worker]
     Kafka --> Search[Search Indexer]
     Kafka --> Relay[Notification Relay]
-
     Audit --> MySQL
     Zip --> MySQL
     Zip --> MinIO
     Thumb --> MySQL
     Thumb --> MinIO
-    Search -->|least-privilege app user| ES
+    Search --> ES
     Search --> MinIO
     Thumb --> Redis
     Search --> Redis
     Relay --> Redis
+
+    Ops[Project Operations] --> MySQL
+    Ops --> MinIO
+    Prometheus -->|scrape| Ops
+    Grafana --> Prometheus
+    Prometheus --> Alertmanager
+    Auth --> Jaeger
+    Files --> Jaeger
+    Metadata --> Jaeger
 ```
 
-The Audit Logger is the sole owner of audit persistence. The Metadata notification consumer uses a separate Kafka consumer group (`metadata-notifications`) and only relays activity events to Redis, preventing audit and notification workloads from competing for the same messages.
+Project lifecycle actions handled by Auth Service are written synchronously to
+the project audit trail. File and user events are published through Kafka and
+persisted by Audit Logger. Notification Relay uses its own
+`metadata-notifications` consumer group so notification delivery does not
+compete with audit processing.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries, request flows,
+project authorization, storage semantics and operational recovery.
 
 ---
 
 ## 🛠️ Tech Stack
 
 | Domain | Technology | Purpose |
-|--------|-----------|---------|
-| **Frontend** | Next.js 14, React, TypeScript | UI, Client-side logic, Framer Motion animations |
-| **Backend** | Python, FastAPI, SQLAlchemy | High-performance async microservices |
-| **Database** | MySQL 8.0, asyncmy | Relational data persistence (Users, Metadata, Versions) |
-| **Cache & Pub/Sub**| Redis 7 | Cross-service JWT revocation checks and WebSocket notification Pub/Sub |
-| **Object Storage** | MinIO | S3-compatible file and version storage |
-| **Message Broker**| Apache Kafka, Zookeeper | Async event streaming (`file-events`, `user-events`) |
-| **Search Engine** | Elasticsearch 8.11, Kibana | Full-text search and management |
-| **Monitoring** | Prometheus, Grafana, Jaeger | Metrics, visualization, and distributed tracing |
-| **Routing** | Nginx | Reverse proxy, API gateway, WebSocket proxy |
+|---|---|---|
+| Frontend | Next.js 16.2.6, React 19, TypeScript | UI, previews and interactive topology |
+| Backend | Python 3.11, FastAPI 0.115.6, SQLAlchemy | Async API microservices |
+| Database | MySQL 8.0, asyncmy | Users, projects, metadata, versions and audit |
+| Cache and Pub/Sub | Redis 7 | JWT revocation and WebSocket notifications |
+| Object storage | MinIO | Personal and project objects/version storage |
+| Event bus | Apache Kafka, ZooKeeper | `file-events` and `user-events` |
+| Search | Elasticsearch 8.11, Kibana | Full-text indexing and administration |
+| Observability | Prometheus, Grafana, Alertmanager, Jaeger | Metrics, alerts, dashboards and traces |
+| Routing | Nginx | Gateway, API routing and WebSocket proxy |
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose v2+
-- Node.js 18+ (for frontend)
-- Python 3.11+ (for testing/scripts)
 
-### 1. Start Infrastructure & Backend
+- Docker Engine and Docker Compose v2+
+- Node.js `>=20.9.0` for local frontend development
+- Python 3.11+ for validation and operations scripts
+
+### Start the complete stack
+
 ```bash
-# Clone the repository
 git clone https://github.com/hquan07/CloudVault.git
 cd CloudVault
 
-# Create local configuration. Generate every blank secret independently with:
-# openssl rand -hex 32
 cp .env.example .env
+# Fill every required password/secret. Generate independent values with:
+# openssl rand -hex 32
 
-# Fill all blank password/secret fields before starting the stack.
-# Compose fails closed when a required secret is missing.
+# Compose declares this as an external network, so create it once first.
+./scripts/setup_shared_network.sh
 
-# Start all infrastructure, backend, workers, and frontend services
+docker compose config -q
 docker compose up -d --build
-
-# Verify all services are running
 docker compose ps
 ```
 
-### 2. Start Frontend
+Access the application through Nginx at [http://localhost](http://localhost).
+The direct frontend port `3000` is bound to loopback for local debugging.
+
+### Run the frontend locally
+
 ```bash
-# The frontend is fully containerized in the docker-compose setup.
-# If you wish to run it locally for development instead:
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
-Access the application through Nginx at: **[http://localhost](http://localhost)**. Port `3000` remains available on loopback for local frontend debugging.
 
 ---
 
 ## 🔌 Service Port Registry
 
-Docker Compose exposes only the gateway publicly by default. Debug and administration UIs bind to loopback; data services have no host port.
+Only Nginx is publicly bound by default. Application and administration ports
+bind to loopback; persistence and messaging services stay Docker-internal.
 
 | Service / Container | Host Port | Exposure | Description |
-|---------------------|-----------|----------|-------------|
-| **Nginx Gateway** | `80` | Public (`NGINX_BIND_ADDRESS`) | Main HTTP and WebSocket entry point |
-| **Next.js Frontend** | `3000` | Loopback (`APP_BIND_ADDRESS`) | Direct frontend debugging |
-| **Auth Service** | `8001` | Loopback (`APP_BIND_ADDRESS`) | User registration and JWT auth |
-| **File Service** | `8002` | Loopback (`APP_BIND_ADDRESS`) | File upload, download, and storage |
-| **Metadata Service** | `8003` | Loopback (`APP_BIND_ADDRESS`) | Metadata, sharing, search, and WebSocket API |
-| **MinIO API / Console** | `9000` / `9001` | Loopback (`INFRA_BIND_ADDRESS`) | S3 API and administration UI |
-| **Kibana** | `5601` | Loopback (`INFRA_BIND_ADDRESS`) | Search administration UI |
-| **Kafka UI** | `8080` | Loopback (`INFRA_BIND_ADDRESS`) | Kafka cluster administration |
-| **Grafana** | `3001` | Loopback (`INFRA_BIND_ADDRESS`) | Metrics dashboards |
-| **Prometheus** | `9090` | Loopback (`INFRA_BIND_ADDRESS`) | Time-series metrics |
-| **Alertmanager** | `9093` | Loopback (`INFRA_BIND_ADDRESS`) | Project quota, integrity, API error and latency alerts |
-| **Jaeger** | `16686` | Loopback (`INFRA_BIND_ADDRESS`) | Distributed tracing UI |
-| **MySQL / Redis / Elasticsearch / Kafka / ZooKeeper** | None | Docker network only | Internal persistence, search, cache, and messaging |
+|---|---:|---|---|
+| Nginx Gateway | `80` | Public (`NGINX_BIND_ADDRESS`) | UI, API and WebSocket entry point |
+| Next.js Frontend | `3000` | Loopback (`APP_BIND_ADDRESS`) | Direct frontend debugging |
+| Auth Service | `8001` | Loopback (`APP_BIND_ADDRESS`) | Users, projects, members and service accounts |
+| File Service | `8002` | Loopback (`APP_BIND_ADDRESS`) | Personal/project file and folder operations |
+| Metadata Service | `8003` | Loopback (`APP_BIND_ADDRESS`) | Sharing, search, activity and WebSocket API |
+| MinIO API / Console | `9000` / `9001` | Loopback (`INFRA_BIND_ADDRESS`) | Object storage and administration |
+| Kibana | `5601` | Loopback (`INFRA_BIND_ADDRESS`) | Search administration |
+| Kafka UI | `8080` | Loopback (`INFRA_BIND_ADDRESS`) | Kafka administration |
+| Grafana | `3001` | Loopback (`INFRA_BIND_ADDRESS`) | Metrics dashboards |
+| Prometheus | `9090` | Loopback (`INFRA_BIND_ADDRESS`) | Time-series metrics |
+| Alertmanager | `9093` | Loopback (`INFRA_BIND_ADDRESS`) | Quota, integrity and operation alerts |
+| Jaeger | `16686` | Loopback (`INFRA_BIND_ADDRESS`) | Distributed tracing UI |
+| Project Operations | None (`9100` internal) | Docker network only | Reconciliation/retention metrics and health |
+| MySQL / Redis / Elasticsearch / Kafka / ZooKeeper | None | Docker network only | Internal data, cache, search and messaging |
 
-## 🔐 Infrastructure Security
+## 🔐 Security Boundaries
 
-- Required secrets have no committed defaults. Keep `.env` local and generate a different random value for every password and `JWT_SECRET_KEY`.
-- MySQL, Redis, Elasticsearch, Kafka, and ZooKeeper are reachable only inside `cloudvault-network`; application traffic enters through Nginx.
-- Elasticsearch security is enabled. Kibana uses `kibana_system`, while Metadata Service and Search Indexer use the dedicated `cloudvault_app` role scoped to `cloudvault-files`.
-- Redis requires authentication. Grafana and MinIO no longer accept default credentials.
-- Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` set to `127.0.0.1` unless access is protected by a firewall or private network. HTTP TLS should terminate at a trusted reverse proxy in production.
+- Required secrets have no committed defaults. Keep `.env` local and use a
+  different random value for every password and `JWT_SECRET_KEY`.
+- Browser users authenticate with JWTs. Project applications use independently
+  revocable, scope-limited service tokens; CloudVault stores token hashes only.
+- MySQL, Redis, Elasticsearch, Kafka and ZooKeeper are only reachable through
+  `cloudvault-network`.
+- `cloudvault-shared` exposes only the Nginx gateway to connected project
+  uploader services. It does not expose MySQL, Redis or MinIO.
+- Elasticsearch uses separate bootstrap, Kibana and least-privilege application
+  accounts. Redis, Grafana and MinIO require configured credentials.
+- Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a
+  firewall/private network protects access. Terminate TLS at Nginx or an
+  upstream trusted proxy in production.
 
-## Project operations và khôi phục
+## ♻️ Project Operations and Recovery
 
-Worker `project-operations` đối chiếu quota/metadata với MinIO, phát hiện upload
-treo, object thiếu/mồ côi và file quá retention. Worker mặc định chỉ quan sát;
-mọi chế độ sửa hoặc xóa dữ liệu phải được operator bật rõ ràng.
+`project-operations` is observe-only by default. Reconciliation fixes and
+retention deletion require explicit operator configuration. Before enabling
+destructive retention, create and verify a metadata/object backup and complete a
+restore drill.
 
-Hướng dẫn monitoring, cảnh báo, backup, restore drill và khôi phục riêng từng
-project nằm tại
-[Phase 8 Operations Runbook](docs/integration/PHASE_8_OPERATIONS_RUNBOOK.md).
+Command forms:
+
+```bash
+./scripts/operations/backup.sh /absolute/path/outside-docker-volumes
+./scripts/operations/verify-backup.sh /absolute/path/to/cloudvault-backup
+./scripts/operations/restore-drill.sh /absolute/path/to/cloudvault-backup
+./scripts/operations/recover-project.sh BACKUP_DIR SOURCE_SLUG TARGET_PROJECT BASE_URL SERVICE_TOKEN --dry-run
+```
 
 ---
 
-## 🧪 Testing
+## 🧪 Validation
 
-The project includes an end-to-end Python test suite that validates the entire backend pipeline.
+The repository currently uses static/build validation and operational smoke
+checks; it does not contain the previously referenced `scripts/test_phase4.py`
+test suite.
 
 ```bash
-# Install test dependencies
-pip install requests
+docker compose config -q
+python3 -m compileall -q services workers
+bash -n infrastructure/mysql/run-migrations.sh scripts/setup_shared_network.sh scripts/operations/*.sh
 
-# Run the End-to-End Test Suite
-python scripts/test_phase4.py
+cd frontend
+npm ci
+npm run lint
+npm run build
+```
+
+After startup:
+
+```bash
+curl -fsS http://localhost/health/auth
+curl -fsS http://localhost/health/file
+curl -fsS http://localhost/health/metadata
+docker compose ps
 ```
 
 ---
 
 ## 📝 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License. See [LICENSE](LICENSE).
