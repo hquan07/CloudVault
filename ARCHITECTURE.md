@@ -1,204 +1,359 @@
 # 🏛️ CloudVault Architecture
 
-This document provides a detailed breakdown of the CloudVault system architecture, as represented in the interactive System Topology dashboard. The system is designed using a multi-layered, event-driven microservices approach.
+CloudVault is a self-hosted storage platform with two isolated ownership models:
 
-## 📊 System Diagram
+- **Personal storage** belongs to one user and powers **My Files**, sharing,
+  versions, search and personal trash.
+- **Project Storage** belongs to a project boundary and is governed by project
+  membership, service-account scopes, project quota and retention policy.
+
+The system uses synchronous REST/WebSocket paths for interactive requests,
+Kafka consumer groups for asynchronous file processing, and a separate
+operations plane for reconciliation, retention, metrics and recovery.
+
+## 1. System Context
 
 ```mermaid
-graph TD
-    %% Layer 1
-    User(("End User (Client)"))
+flowchart TB
+    Browser[Browser user]
+    Ecommerce[E-commerce uploader]
+    News[News_Flow uploader]
+    Stock[Real-Time Stock uploader]
 
-    %% Layer 1.5
-    Nginx["Nginx LB (Public Host Entry Point)"]
+    Shared[cloudvault-shared<br/>external Docker network]
+    Gateway[Nginx Gateway<br/>cloudvault-api]
+    Frontend[Next.js Frontend]
 
-    %% Layer 2
-    Web["Next.js App (Web Application)"]
+    Auth[Auth Service]
+    Files[File Service]
+    Metadata[Metadata Service]
 
-    %% Layer 3
-    subgraph frontend ["Frontend Components"]
-        FilePreview["File Preview (UI Component)"]
-        ShareUI["Share UI (UI Component)"]
-        AuthCtx["Auth State (React Context)"]
-        Notif["Notifications (UI Component)"]
-    end
+    Browser -->|UI, REST, WebSocket<br/>JWT| Gateway
+    Ecommerce -->|REST + cvp_ token| Shared
+    News -->|REST + cvp_ token| Shared
+    Stock -->|REST + cvp_ token| Shared
+    Shared --> Gateway
 
-    %% Layer 4
-    API["API Client (Fetch)"]
-
-    %% Layer 5
-    subgraph core ["Core Microservices (FastAPI)"]
-        Auth["Auth Service"]
-        Files["File Service"]
-        Meta["Metadata Service"]
-    end
-
-    %% Layer 6
-    Kafka{"Apache Kafka (Internal Message Broker)"}
-    Redis[("Redis (Authenticated, Internal)")]
-
-    %% Layer 7
-    subgraph workers ["Asynchronous Workers (Python)"]
-        AuditW["Audit Logger"]
-        ZipW["ZIP Extractor"]
-        ThumbW["Thumbnail Gen"]
-        SearchW["Search Indexer"]
-        NotifyW["Notification Relay<br/>(metadata-notifications group)"]
-    end
-
-    %% Layer 8
-    MySQL[("MySQL (Internal Relational DB)")]
-    MinIO[("MinIO (Object Storage)")]
-    ES[("Elasticsearch (Authenticated Search)")]
-
-    %% Connections
-    User -->|HTTP| Nginx
-    Nginx -->|Proxy| Web
-    Nginx -->|API Routing| API
-
-    %% Web to internal
-    Web -.-> AuthCtx
-    Web -->|Requests| API
-    AuthCtx -->|Auth State| API
-    FilePreview -->|Download| API
-    ShareUI -->|Sharing| API
-    Meta -->|WebSocket Push| Notif
-
-    %% API to Services
-    API -->|REST| Auth
-    API -->|REST| Files
-    API -->|REST| Meta
-
-    %% Auth Service Connections
-    Auth -->|R/W| MySQL
-    Auth <-->|Write / Check Revocation| Redis
-
-    %% File Service Connections
-    Files -->|R/W| MySQL
-    Files -->|Store Objects| MinIO
-    Files ==>|Publish Events| Kafka
-    Files -.->|Check Revocation| Redis
-
-    %% Meta Service Connections
-    Meta -->|R/W| MySQL
-    Meta -->|Authenticated Query| ES
-    Meta <-->|Revocation Check / Pub-Sub| Redis
-
-    %% Kafka to Workers
-    Kafka -->|Consume| AuditW
-    Kafka -->|Consume| ZipW
-    Kafka -->|Consume| ThumbW
-    Kafka -->|Consume| SearchW
-    Kafka -->|Consume| NotifyW
-
-    %% Worker Connections
-    AuditW -->|Write Audit| MySQL
-    ZipW -->|Read/Store| MinIO
-    ZipW -->|Write Records + Quota| MySQL
-    ThumbW -->|Read/Store| MinIO
-    ThumbW -->|Update| MySQL
-    ThumbW -.->|Notify| Redis
-    SearchW -->|Read Content| MinIO
-    SearchW -->|Least-Privilege Indexing| ES
-    SearchW -.->|Notify| Redis
-    NotifyW -.->|Publish Activity| Redis
+    Gateway --> Frontend
+    Gateway --> Auth
+    Gateway --> Files
+    Gateway --> Metadata
 ```
 
-## 📡 Topology Overview
+Nginx is the only component attached to both `cloudvault-network` and the
+external `cloudvault-shared` network. Project clients use the stable
+`cloudvault-api` alias and never receive direct MySQL, Redis or MinIO access.
 
-### Layer 1: End User (Client)
-- **End User:** The entry point to the system, interacting via web browsers.
+## 2. Runtime Topology
 
-### Layer 1.5: API Gateway / Load Balancer
-- **Nginx LB:** Acts as the only public host entry point by default, routing incoming HTTP and WebSocket traffic to the appropriate downstream services. TLS should terminate here or at an upstream trusted proxy in production.
+```mermaid
+flowchart TD
+    Gateway[Nginx Gateway]
+    Web[Next.js Frontend]
 
-### Layer 2: Web Application
-- **Next.js App:** The primary frontend web application handling Server-Side Rendering (SSR) and Client-Side Routing.
+    subgraph API[FastAPI services]
+        Auth[Auth Service]
+        Files[File Service]
+        Meta[Metadata Service]
+    end
 
-### Layer 3: Frontend Components & Context
-- **File Preview:** UI component for rendering files (images, videos, audio) directly in the browser.
-- **Share UI:** UI component for managing file and folder sharing permissions.
-- **Auth State (React Context):** Manages user authentication state globally across the frontend.
-- **Notifications:** Manages WebSocket connections for real-time toast notifications.
+    subgraph Data[Persistence and messaging]
+        MySQL[(MySQL 8)]
+        MinIO[(MinIO)]
+        Redis[(Redis 7)]
+        Kafka{Kafka}
+        ES[(Elasticsearch 8.11)]
+    end
 
-### Layer 4: API Client
-- **API Client:** Centralized Fetch-based client (`api.ts`) that adds access tokens, rotates refresh tokens after a `401`, and retries the original request once.
+    subgraph Async[Event consumers]
+        Audit[Audit Logger]
+        Zip[Guarded ZIP Extractor]
+        Thumb[Thumbnail Worker]
+        Search[Search Indexer]
+        Relay[Notification Relay]
+    end
 
-### Layer 5: Core Microservices (FastAPI)
-- **Auth Service:** Handles user registration/login, access-token revocation, refresh-token rotation, and refresh-token revocation during logout.
-- **File Service:** Streams uploads to MinIO using a bounded 1 MB application buffer, retains versions, calculates physical storage usage, and handles download/delete operations.
-- **Metadata Service:** Manages metadata, sharing, search, storage reporting, authenticated WebSocket connections, and the Kafka-to-Redis notification relay.
-- **Shared authorization rule:** Auth, File, and Metadata services all reject non-access JWTs, Redis-blacklisted tokens, and inactive users.
+    subgraph Operations[Operations and observability]
+        Migrate[MySQL Migrate<br/>one-shot]
+        Ops[Project Operations]
+        Prom[Prometheus]
+        Grafana[Grafana]
+        Alerts[Alertmanager]
+        Jaeger[Jaeger]
+    end
 
-### Layer 6: Event Bus & Caching
-- **Apache Kafka:** The Docker-internal message broker handling high-throughput, asynchronous events (`file-events`, `user-events`). It has no host port in the default Compose profile.
-- **Redis:** An authenticated, Docker-internal service that stores access-token revocation markers checked by every API service and acts as the Pub/Sub broker for WebSocket notifications.
+    Gateway --> Web
+    Gateway --> Auth
+    Gateway --> Files
+    Gateway --> Meta
 
-### Layer 7: Asynchronous Workers (Python)
-- **Audit Logger:** Sole consumer responsible for persisting supported user/file events to the MySQL audit log.
-- **ZIP Extractor:** Extracts uploaded ZIP files with entry-count, expanded-size, compression-ratio, encryption, and user-quota guards before storing results in MinIO/MySQL.
-- **Thumbnail Gen:** Consumes Kafka events to generate image thumbnails, stores them in MinIO, and publishes notification events to Redis.
-- **Search Indexer:** Consumes Kafka events to parse file content (from MinIO) and index it into Elasticsearch for fast querying.
-- **Notification Relay:** Logical worker running inside Metadata Service. It consumes `file-events` with the dedicated `metadata-notifications` consumer group and publishes activity messages to Redis without writing audit records.
+    Auth --> MySQL
+    Auth <-->|revocation| Redis
+    Files --> MySQL
+    Files --> MinIO
+    Files --> Kafka
+    Files --> Redis
+    Meta --> MySQL
+    Meta --> ES
+    Meta <-->|revocation and Pub/Sub| Redis
 
-### Layer 8: Persistence & Search Databases
-- **MySQL:** The primary relational database storing users, metadata, file versions, and audit logs. It is reachable only from `cloudvault-network`.
-- **MinIO:** S3-compatible object storage for raw files, thumbnails, and avatars. Its host API and console bind to loopback by default.
-- **Elasticsearch:** An authenticated, Docker-internal search engine. Metadata Service and Search Indexer use the dedicated `cloudvault_app` role, scoped to the `cloudvault-files` index; Kibana uses `kibana_system`.
+    Kafka --> Audit
+    Kafka --> Zip
+    Kafka --> Thumb
+    Kafka --> Search
+    Kafka --> Relay
+    Audit --> MySQL
+    Zip --> MySQL
+    Zip --> MinIO
+    Thumb --> MySQL
+    Thumb --> MinIO
+    Thumb --> Redis
+    Search --> MinIO
+    Search --> ES
+    Search --> Redis
+    Relay --> Redis
 
-## 🔐 Infrastructure Security Boundary
+    Migrate --> MySQL
+    Ops --> MySQL
+    Ops --> MinIO
+    Prom -->|scrape :9100| Ops
+    Grafana --> Prom
+    Prom --> Alerts
+    Auth --> Jaeger
+    Files --> Jaeger
+    Meta --> Jaeger
+```
+
+### API ownership
+
+| Component | Primary responsibilities |
+|---|---|
+| Nginx | Host entry point, UI/API/WebSocket routing, request limits and project route dispatch |
+| Auth Service | Users, JWT lifecycle, admin APIs, projects, membership, project policy, project lifecycle and service accounts |
+| File Service | Personal/project folders and files, streamed object I/O, versions, idempotency, quota reservation, trash and project operation status |
+| Metadata Service | Metadata views, sharing, activity, Elasticsearch queries and authenticated WebSocket delivery |
+
+Project routes are intentionally split. Nginx sends project lifecycle,
+membership and service-account requests to Auth Service, while project file,
+folder, usage and operation-status requests go to File Service.
+
+## 3. Identity and Authorization
+
+### Browser users
+
+1. Auth Service verifies credentials against MySQL.
+2. It issues a short-lived access JWT and a refresh token whose hash is stored in
+   MySQL.
+3. Refresh tokens rotate when used. Logout revokes the refresh token and stores
+   the access-token `jti` in Redis for its remaining lifetime.
+4. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
+   and inactive users.
+5. Project access additionally requires system-admin status or project
+   membership with the required `viewer`, `editor` or `admin` role.
+
+### Project applications
+
+1. A project administrator creates a service account and selects scopes.
+2. CloudVault returns a `cvp_` token once and stores only its SHA-256 hash,
+   prefix, scopes, expiry and lifecycle metadata.
+3. The client sends `Authorization: Bearer <cvp_token>` to a project route.
+4. File Service derives the authoritative project from the token. A token from
+   one project cannot be used against another project ID.
+5. Required scopes include `files:create`, `files:read`, `files:delete` and
+   `project:usage:read`; clients receive only the scopes they need.
+6. Tokens can be rotated or revoked independently. Archiving a project revokes
+   active service accounts; restored projects require new token rotation.
+
+## 4. Storage Ownership and Quota
+
+### Personal files
+
+- `project_id` is `NULL`; ownership remains tied to `user_id`.
+- Physical storage usage includes retained version objects.
+- Soft delete changes metadata state. Permanent delete removes the current
+  object, retained versions and derived objects before releasing quota.
+
+### Project files
+
+- `project_id` is the security and quota boundary. Folder names never grant
+  access.
+- The creator can be a user or service account and remains visible in audit
+  metadata.
+- Project folders organize content but remain inside the same project boundary.
+- Stars and project pins are per-user preferences; they do not modify shared
+  project ownership.
+- Files in project trash continue to consume project quota until permanently
+  deleted.
+
+### Project upload transaction
+
+```mermaid
+sequenceDiagram
+    participant C as Project client
+    participant N as Nginx
+    participant F as File Service
+    participant D as MySQL
+    participant O as MinIO
+
+    C->>N: POST project upload + Bearer token + Idempotency-Key
+    N->>F: Route project file request
+    F->>D: Validate project/token/scope and lock quota
+    F->>D: Create PENDING reservation
+    F->>O: Stream object and calculate SHA-256
+    F->>D: Commit file/version and AVAILABLE status
+    F-->>C: file_id, checksum and metadata
+```
+
+- `Idempotency-Key` is mandatory for project uploads.
+- The same key and content returns a stable result; conflicting reuse is
+  rejected.
+- Quota is reserved under a project row lock before object acceptance and is
+  reconciled after success or failure.
+- A file becomes `AVAILABLE` only after its object and metadata are committed.
+- Interrupted uploads remain detectable as stale reservations instead of
+  silently consuming quota forever.
+
+## 5. Request and Event Flows
+
+### Interactive request flow
+
+1. A browser or project client calls Nginx.
+2. Nginx serves the Next.js UI or routes `/api/v1` and `/health` requests to the
+   owning API service.
+3. The target service authenticates the JWT or service token and applies user,
+   membership, role, scope and project-state checks.
+4. The service performs synchronous MySQL, MinIO, Redis or Elasticsearch work.
+5. Metadata Service sends activity notifications over an authenticated
+   WebSocket after Redis Pub/Sub delivery.
+
+The frontend API client does not bypass Nginx. It calls same-origin gateway
+routes, and Nginx selects the backend service.
+
+### Kafka event flow
+
+1. File Service publishes supported `file-events`. The `user-events` topic is
+   provisioned for compatible event producers, but current project lifecycle
+   audit writes do not depend on it.
+2. Audit Logger, ZIP Extractor, Thumbnail Worker and Search Indexer use separate
+   consumer groups so each can process the same event independently.
+3. Notification Relay runs inside Metadata Service with the
+   `metadata-notifications` consumer group and publishes user activity to Redis.
+4. Metadata Service subscribes to the per-user Redis channel and pushes events
+   over WebSocket.
+
+Audit ownership is split deliberately:
+
+- Audit Logger persists supported Kafka events from its `file-events` and
+  `user-events` subscriptions.
+- Auth Service writes project lifecycle, membership and service-account audit
+  entries synchronously with the project operation.
+
+### Guarded ZIP extraction
+
+The ZIP worker spools archives with bounded memory and rejects excessive entry
+counts, expanded sizes, compression ratios and encrypted entries. Extracted
+records and quota updates commit together; created objects are cleaned up after
+failure.
+
+## 6. Project Lifecycle
+
+- **Active:** normal member and service-account access.
+- **Suspended:** policy-controlled state that prevents normal project writes.
+- **Archived:** read-only project; active service credentials are revoked.
+- **Restored:** returns the project to active management, but service credentials
+  must be rotated explicitly.
+- **Permanent deletion:** allowed only after every project file, including trash,
+  has been permanently removed.
+
+Lifecycle, policy, membership, service-account and storage events appear in the
+project activity feed.
+
+## 7. Operations Plane
+
+`project-operations` is a periodic worker, not a Kafka consumer. It compares:
+
+- recorded project usage;
+- bytes derived from file versions and active reservations;
+- objects and bytes present under the project MinIO prefix;
+- stale `PENDING` uploads;
+- missing and orphan objects;
+- available files past their retention deadline.
+
+The worker exports Prometheus metrics on internal port `9100`. Prometheus
+evaluates quota, drift, object-integrity, stale-upload and worker-health rules;
+Grafana visualizes them and Alertmanager receives firing alerts.
+
+Reconciliation repair and retention deletion are opt-in. The safe rollout is:
+
+1. observe metrics and run retention in dry-run mode;
+2. create an independent metadata/object backup;
+3. verify checksums and complete a restore drill;
+4. enable one repair/deletion behavior at a time;
+5. monitor alerts and retain the original project source until recovery is
+   proven.
+
+Operational scripts live in `scripts/operations/`:
+
+- `backup.sh` exports MySQL, project object mappings and MinIO buckets;
+- `verify-backup.sh` validates manifest checksums and the SQL archive;
+- `restore-drill.sh` restores into isolated temporary MySQL/MinIO containers;
+- `recover-project.sh` re-uploads one project through the public CloudVault API
+  and records old-to-new `file_id` mappings.
+
+## 8. Database Initialization and Migration
+
+The MySQL image runs the baseline schema for a new volume. The one-shot
+`mysql-migrate` service waits for MySQL health and applies ordered, idempotent
+migrations before API services start. Project migrations add project ownership,
+service accounts, audit context, folders, per-user stars/pins and project
+operation status without changing existing personal ownership.
+
+Database and object storage must be backed up together. Restoring only MySQL or
+only MinIO can leave valid metadata without objects, or objects without a
+reachable `file_id`.
+
+## 9. Network and Security Boundaries
 
 ```mermaid
 flowchart LR
-    Client[Client / Browser] -->|Host port 80| Gateway[Nginx]
-    Admin[Local administrator] -->|127.0.0.1 only| Tools[MinIO / Kibana / Kafka UI / Grafana / Prometheus / Jaeger]
-    Gateway --> App[Frontend + FastAPI services]
-    App --> Private[MySQL / Redis / Elasticsearch / Kafka / ZooKeeper]
-    Workers[Background workers] --> Private
-    Private -. no host ports .-> Network[cloudvault-network]
+    Internet[Browser / trusted host client] -->|host port 80| Gateway[Nginx]
+    Project[Project uploader containers] --> Shared[cloudvault-shared]
+    Shared -->|cloudvault-api| Gateway
+
+    Gateway --> Private[cloudvault-network]
+    Private --> Apps[Frontend and FastAPI services]
+    Apps --> Data[MySQL / Redis / MinIO / Elasticsearch / Kafka]
+    Workers[Workers] --> Data
+
+    Admin[Local administrator] -->|127.0.0.1 only| Tools[MinIO Console / Kibana / Kafka UI / Grafana / Prometheus / Alertmanager / Jaeger]
 ```
 
-- Required credentials are injected from the gitignored `.env`; Compose rejects startup when a required secret is absent.
-- MySQL, Redis, Elasticsearch, Kafka, and ZooKeeper do not publish host ports.
-- Application and administration debug ports bind to `127.0.0.1` by default. Only Nginx binds to `0.0.0.0` unless explicitly reconfigured.
-- Elasticsearch rejects anonymous requests and separates the bootstrap administrator, Kibana system account, and least-privilege application account.
-- Secret rotation on persistent volumes must update both `.env` and the corresponding datastore account; changing only the environment file does not rotate an existing database user.
+- Nginx is publicly bound by default; direct application and administration
+  ports bind to loopback.
+- Persistence, cache, search and messaging services do not publish host ports,
+  except MinIO's loopback-only administration endpoints.
+- `cloudvault-shared` contains Nginx and explicitly selected uploader services,
+  not CloudVault data services.
+- Elasticsearch rejects anonymous access and uses separate bootstrap, Kibana
+  and least-privilege application users.
+- Redis, MinIO and Grafana require configured credentials. Compose rejects
+  missing required secrets.
+- TLS should terminate at Nginx or a trusted upstream proxy in production.
 
----
+## 10. Health and Observability Semantics
 
-## 🔄 Data & Event Flows
+Nginx exposes live checks for the three API services:
 
-### 1. Request Flow (Synchronous)
-1. The **End User** sends a request to the Nginx host entry point.
-2. **Nginx** proxies the request to the **Next.js App** (for UI) or directly to the **API Client**.
-3. The **API Client** sends REST requests to one of the Core Microservices (**Auth**, **File**, or **Metadata**).
-4. Each protected service validates the JWT signature/type, checks Redis revocation state, and verifies that the user remains active.
-5. The services then perform synchronous reads/writes to **MySQL**, **MinIO**, or **Elasticsearch** as required.
+- `/health/auth`
+- `/health/file`
+- `/health/metadata`
 
-### 2. Event-Driven Flow (Asynchronous)
-1. When an action occurs (e.g., a file is uploaded), the **File Service** publishes an event to **Kafka**.
-2. **Workers** (Thumbnail Gen, Search Indexer, ZIP Extractor, Audit Logger, and Notification Relay) independently consume these events using separate Kafka consumer groups.
-3. Workers perform their heavy tasks (e.g., reading from MinIO, indexing to Elasticsearch, writing to MySQL).
-4. Notification-producing workers publish to a per-user **Redis Pub/Sub** channel.
-5. The **Metadata Service** subscribes to that channel and pushes messages over the authenticated WebSocket connection.
-6. The Audit Logger remains the only component that writes Kafka events to `audit_logs`; notification delivery does not compete for its partitions.
+The Project Operations container has an internal health check against its
+Prometheus metrics endpoint. Other components are represented as documented
+topology unless an aggregate health API is added. The Architecture tab therefore
+distinguishes live API nodes from documented nodes instead of implying that
+every displayed component is actively probed.
 
-### 3. Caching & Auth Flow
-1. **Auth Service** verifies credentials against **MySQL**.
-2. Access tokens are stateless JWTs with a unique `jti`; refresh tokens are hashed in MySQL and rotated whenever they are used.
-3. Logout blacklists the access-token `jti` in **Redis** for its remaining lifetime and revokes the submitted refresh token in **MySQL**.
-4. Auth, File, Metadata, and notification WebSocket authentication all enforce the same revocation and active-user checks.
-
-### 4. Upload, Version, and Deletion Flow
-1. The File Service reads an upload incrementally in 1 MB chunks to calculate its size and SHA-256 checksum without allocating a second full-file buffer.
-2. The stream is rewound and written to **MinIO**, then its metadata/version record and physical-byte usage are committed to **MySQL**.
-3. Overwrites retain previous MinIO objects as file versions, so `users.storage_used` includes all unique physical version objects.
-4. Soft delete changes metadata only. Permanent delete removes every unique version object plus its thumbnail, deletes relational records, and decrements physical storage usage.
-
-### 5. Guarded ZIP Extraction Flow
-1. The ZIP worker spools the source archive with bounded memory.
-2. Before extraction it validates entry count, total expanded bytes, suspicious compression ratios, encrypted entries, and the owner's remaining quota.
-3. Extracted records and quota changes are committed together; uploaded MinIO objects are cleaned up if extraction fails.
-
----
-*Generated based on the internal `ArchitectureTab.jsx` visual topology.*
+This document is the canonical architecture description. The README diagram is
+a compact system-context view; the in-app Architecture tab is its interactive
+topology view.

@@ -109,8 +109,8 @@ flowchart TD
 ```
 
 Project lifecycle actions handled by Auth Service are written synchronously to
-the project audit trail. File and user events are published through Kafka and
-persisted by Audit Logger. Notification Relay uses its own
+the project audit trail. File events are published through Kafka and persisted
+by Audit Logger. Notification Relay uses its own
 `metadata-notifications` consumer group so notification delivery does not
 compete with audit processing.
 
