@@ -18,6 +18,8 @@ import asyncio
 import hashlib
 import json
 import os
+import re
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -26,12 +28,13 @@ from datetime import datetime, timedelta, timezone
 import jwt as pyjwt
 import redis.asyncio as aioredis
 from aiokafka import AIOKafkaProducer
-from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from minio import Minio
 from pydantic import BaseModel, Field
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +43,7 @@ from app.config import settings
 from app.database import get_db, async_session
 from app.models import (
     User, File, Folder, FileVersion, Project, ProjectMembership,
-    ProjectFileStar, ServiceAccount, ProjectUpload,
+    ProjectFileStar, ServiceAccount, ProjectUpload, ProjectOperationStatus,
 )
 
 # ── Global clients ──
@@ -49,6 +52,29 @@ minio_public_client: Minio | None = None
 kafka_producer: AIOKafkaProducer | None = None
 redis_client: aioredis.Redis | None = None
 reconciliation_task: asyncio.Task | None = None
+
+PROJECT_API_REQUESTS = Counter(
+    "cloudvault_project_api_requests_total",
+    "Project-scoped API requests grouped by project, method, and status.",
+    ("project", "method", "status"),
+)
+PROJECT_API_LATENCY = Histogram(
+    "cloudvault_project_api_request_duration_seconds",
+    "Project-scoped API latency grouped by project and method.",
+    ("project", "method"),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
+)
+PROJECT_UPLOAD_BYTES = Counter(
+    "cloudvault_project_uploaded_bytes_total",
+    "Bytes successfully uploaded through a project-scoped API.",
+    ("project",),
+)
+PROJECT_QUOTA_REJECTIONS = Counter(
+    "cloudvault_project_quota_rejections_total",
+    "Project uploads rejected because the hard quota was reached.",
+    ("project",),
+)
+_PROJECT_PATH = re.compile(r"^/api/v1/projects/([^/]+)(?:/|$)")
 
 
 @asynccontextmanager
@@ -115,6 +141,36 @@ app.add_middleware(
 )
 
 Instrumentator().instrument(app).expose(app)
+
+
+@app.middleware("http")
+async def observe_project_requests(request: Request, call_next):
+    """Expose bounded, project-scoped request volume/error/latency metrics."""
+    match = _PROJECT_PATH.match(request.url.path)
+    if not match:
+        return await call_next(request)
+
+    raw_project = match.group(1)
+    project_label = raw_project if re.fullmatch(r"[A-Za-z0-9-]{1,63}", raw_project) else "invalid"
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        # Do not let unauthenticated/not-found probes create unbounded labels.
+        if status_code not in range(200, 400) and status_code not in {403, 409, 413}:
+            project_label = "rejected"
+        PROJECT_API_REQUESTS.labels(
+            project=project_label,
+            method=request.method,
+            status=str(status_code),
+        ).inc()
+        PROJECT_API_LATENCY.labels(
+            project=project_label,
+            method=request.method,
+        ).observe(time.perf_counter() - started)
 
 from app.telemetry import setup_opentelemetry
 setup_opentelemetry(app, "file-service")
@@ -486,6 +542,41 @@ async def get_project_usage(
     }
 
 
+@app.get("/api/v1/projects/{project_id}/operations")
+async def get_project_operation_status(
+    project_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="project:usage:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    status = await db.get(ProjectOperationStatus, principal.project.id)
+    await db.commit()
+    if not status:
+        return {
+            "project_id": principal.project.id,
+            "health_status": "unknown",
+            "checked_at": None,
+            "details": {"message": "Reconciliation has not completed yet"},
+        }
+    return {
+        "project_id": status.project_id,
+        "health_status": status.health_status,
+        "metadata_bytes": status.metadata_bytes,
+        "object_bytes": status.object_bytes,
+        "usage_drift_bytes": status.usage_drift_bytes,
+        "missing_objects": status.missing_objects,
+        "orphan_objects": status.orphan_objects,
+        "stale_uploads": status.stale_uploads,
+        "expired_files": status.expired_files,
+        "details": status.details_json or {},
+        "checked_at": status.checked_at.isoformat() if status.checked_at else None,
+    }
+
+
 @app.get("/api/v1/projects/{project_id}/folders")
 async def list_project_folders(
     project_id: str,
@@ -774,6 +865,7 @@ async def upload_project_file(
         locked_project.storage_used = max(0, locked_project.storage_used - upload.reserved_bytes)
         upload.reserved_bytes = 0
     if locked_project.storage_used + file_size > locked_project.storage_quota:
+        PROJECT_QUOTA_REJECTIONS.labels(project=locked_project.slug).inc()
         await _emit_event("QUOTA_EXCEEDED", {
             "project_id": locked_project.id,
             "user_id": principal.user.id if principal.user else None,
@@ -899,6 +991,7 @@ async def upload_project_file(
         "size": file_size,
         "minio_key": minio_key,
     })
+    PROJECT_UPLOAD_BYTES.labels(project=locked_project.slug).inc(file_size)
     return _project_file_to_dict(db_file)
 
 

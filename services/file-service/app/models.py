@@ -161,3 +161,19 @@ class ProjectUpload(Base):
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class ProjectOperationStatus(Base):
+    __tablename__ = "project_operation_status"
+
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    health_status = Column(String(20), nullable=False, default="healthy")
+    metadata_bytes = Column(BigInteger, nullable=False, default=0)
+    object_bytes = Column(BigInteger, nullable=False, default=0)
+    usage_drift_bytes = Column(BigInteger, nullable=False, default=0)
+    missing_objects = Column(Integer, nullable=False, default=0)
+    orphan_objects = Column(Integer, nullable=False, default=0)
+    stale_uploads = Column(Integer, nullable=False, default=0)
+    expired_files = Column(Integer, nullable=False, default=0)
+    details_json = Column(JSON, nullable=True)
+    checked_at = Column(DateTime, nullable=False, server_default=func.now())

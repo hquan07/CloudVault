@@ -58,6 +58,10 @@ flowchart TD
     Meta -->|notification WebSocket| Browser
 
     File -->|file-events| Kafka{Kafka}
+    Ops[Project Operations] --> MySQL
+    Ops --> MinIO
+    Prometheus --> Ops
+    Prometheus --> Alertmanager
     Kafka --> Audit[Audit Logger]
     Kafka --> Zip[Guarded ZIP Extractor]
     Kafka --> Thumb[Thumbnail Worker]
@@ -151,6 +155,7 @@ Docker Compose exposes only the gateway publicly by default. Debug and administr
 | **Kafka UI** | `8080` | Loopback (`INFRA_BIND_ADDRESS`) | Kafka cluster administration |
 | **Grafana** | `3001` | Loopback (`INFRA_BIND_ADDRESS`) | Metrics dashboards |
 | **Prometheus** | `9090` | Loopback (`INFRA_BIND_ADDRESS`) | Time-series metrics |
+| **Alertmanager** | `9093` | Loopback (`INFRA_BIND_ADDRESS`) | Project quota, integrity, API error and latency alerts |
 | **Jaeger** | `16686` | Loopback (`INFRA_BIND_ADDRESS`) | Distributed tracing UI |
 | **MySQL / Redis / Elasticsearch / Kafka / ZooKeeper** | None | Docker network only | Internal persistence, search, cache, and messaging |
 
@@ -161,6 +166,16 @@ Docker Compose exposes only the gateway publicly by default. Debug and administr
 - Elasticsearch security is enabled. Kibana uses `kibana_system`, while Metadata Service and Search Indexer use the dedicated `cloudvault_app` role scoped to `cloudvault-files`.
 - Redis requires authentication. Grafana and MinIO no longer accept default credentials.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` set to `127.0.0.1` unless access is protected by a firewall or private network. HTTP TLS should terminate at a trusted reverse proxy in production.
+
+## Project operations và khôi phục
+
+Worker `project-operations` đối chiếu quota/metadata với MinIO, phát hiện upload
+treo, object thiếu/mồ côi và file quá retention. Worker mặc định chỉ quan sát;
+mọi chế độ sửa hoặc xóa dữ liệu phải được operator bật rõ ràng.
+
+Hướng dẫn monitoring, cảnh báo, backup, restore drill và khôi phục riêng từng
+project nằm tại
+[Phase 8 Operations Runbook](docs/integration/PHASE_8_OPERATIONS_RUNBOOK.md).
 
 ---
 

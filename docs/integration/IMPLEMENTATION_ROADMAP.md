@@ -1,6 +1,6 @@
 # Tích hợp Projects với CloudVault — Lộ trình triển khai
 
-**Trạng thái:** Đang triển khai; Giai đoạn 0–4 đã hoàn tất, các giai đoạn pilot 5–8 chưa được mặc định là đã có.
+**Trạng thái:** Giai đoạn 0–8 đã được triển khai; việc bật retention/xóa tự động vẫn phải rollout dần theo runbook vận hành.
 **Phạm vi:** CloudVault cùng `ecommerce-data-platform`, `News_Flow` và `Real-Time_Stock_Prediction_Pipeline`.  
 **Nguyên tắc dung lượng:** CloudVault còn hạn chế dung lượng. Chỉ lưu các sản phẩm đầu ra đã chọn lọc, có giá trị sử dụng; không chuyển toàn bộ dữ liệu làm việc của từng dự án.
 
@@ -165,7 +165,7 @@ có wrapper project-scoped và chỉ uploader được khai báo tham gia
 - Model version đã kiểm định và metadata tải lại được bằng `file_id`; vẫn còn version chạy tốt trước đó để rollback.
 - CloudVault gián đoạn không khiến pipeline nạp model chưa hoàn chỉnh hoặc chưa được xác minh.
 
-### Giai đoạn 8 — Vận hành, khôi phục và mở rộng dần
+### Giai đoạn 8 — Vận hành, khôi phục và mở rộng dần ✅
 
 **Công việc**
 
@@ -179,6 +179,10 @@ có wrapper project-scoped và chỉ uploader được khai báo tham gia
 **Điều kiện hoàn tất**
 
 - Diễn tập restore thành công; usage đối chiếu được với object; vận hành viên có thể revoke credential và khôi phục một project mà không ảnh hưởng project khác.
+
+Monitoring, alert rules, reconciliation/retention worker, backup/restore drill và
+quy trình khôi phục chọn lọc được mô tả tại
+[PHASE_8_OPERATIONS_RUNBOOK.md](PHASE_8_OPERATIONS_RUNBOOK.md).
 
 ## 4. Chính sách ban đầu đề xuất
 

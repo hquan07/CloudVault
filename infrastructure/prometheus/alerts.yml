@@ -1,0 +1,108 @@
+groups:
+  - name: cloudvault-project-operations
+    rules:
+      - alert: CloudVaultProjectQuotaWarning
+        expr: cloudvault_project_quota_ratio >= cloudvault_project_warning_ratio
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project {{ $labels.project }} gần hết quota"
+          description: "Dung lượng đã dùng đạt {{ $value | humanizePercentage }}, vượt ngưỡng cảnh báo của project."
+
+      - alert: CloudVaultProjectQuotaCritical
+        expr: cloudvault_project_quota_ratio >= 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Project {{ $labels.project }} sắp chạm hard quota"
+          description: "Dung lượng đã dùng đạt {{ $value | humanizePercentage }}; cần dọn dữ liệu hoặc tăng quota."
+
+      - alert: CloudVaultProjectQuotaRejectedUpload
+        expr: increase(cloudvault_project_quota_rejections_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upload bị từ chối do quota ở {{ $labels.project }}"
+          description: "Có {{ $value }} lần upload bị từ chối trong 10 phút gần nhất."
+
+      - alert: CloudVaultProjectUsageDrift
+        expr: abs(cloudvault_project_usage_drift_bytes) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Usage của {{ $labels.project }} bị sai lệch"
+          description: "Chênh lệch giữa quota ledger và metadata là {{ $value | humanize1024 }}B."
+
+      - alert: CloudVaultProjectMissingObject
+        expr: cloudvault_project_missing_objects > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Project {{ $labels.project }} thiếu object"
+          description: "Có {{ $value }} object/thumbnail được metadata tham chiếu nhưng không tồn tại trong MinIO."
+
+      - alert: CloudVaultProjectOrphanObject
+        expr: cloudvault_project_orphan_objects > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project {{ $labels.project }} có object mồ côi"
+          description: "Có {{ $value }} object trong MinIO không còn metadata tương ứng."
+
+      - alert: CloudVaultProjectStaleUpload
+        expr: cloudvault_project_stale_uploads > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project {{ $labels.project }} có upload PENDING quá lâu"
+          description: "Có {{ $value }} upload vượt quá thời gian chờ cho phép."
+
+      - alert: CloudVaultProjectApiErrors
+        expr: |
+          sum by (project) (rate(cloudvault_project_api_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum by (project) (rate(cloudvault_project_api_requests_total[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tỷ lệ lỗi API cao ở project {{ $labels.project }}"
+          description: "Tỷ lệ HTTP 5xx trong 5 phút là {{ $value | humanizePercentage }}."
+
+      - alert: CloudVaultProjectApiLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, project) (rate(cloudvault_project_api_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API project {{ $labels.project }} phản hồi chậm"
+          description: "p95 latency trong 5 phút là {{ $value }} giây."
+
+      - alert: CloudVaultProjectOperationsDown
+        expr: absent(up{job="project-operations"} == 1) or up{job="project-operations"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Project operations worker không hoạt động"
+          description: "Prometheus không thu được metrics từ worker trong 5 phút."
+
+      - alert: CloudVaultProjectReconciliationStale
+        expr: time() - cloudvault_project_operations_last_success_timestamp_seconds > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reconciliation project đã quá hạn"
+          description: "Không có chu kỳ reconciliation thành công trong hơn 15 phút."

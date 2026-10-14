@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import {
   ApiError, AuditActivity, Project, ProjectFile, ProjectFileFilters, ProjectFolder,
-  ProjectMember, ProjectUsage, ServiceAccount, metaApi, projectApi,
+  ProjectMember, ProjectOperationStatus, ProjectUsage, ServiceAccount, metaApi, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
@@ -47,6 +47,7 @@ export default function ProjectDetailPage() {
   const projectId = params.projectId;
   const [project, setProject] = useState<Project | null>(null);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
+  const [operations, setOperations] = useState<ProjectOperationStatus | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [trash, setTrash] = useState<ProjectFile[]>([]);
   const [folders, setFolders] = useState<ProjectFolder[]>([]);
@@ -78,8 +79,9 @@ export default function ProjectDetailPage() {
   const loadData = useCallback(async () => {
     try {
       setError('');
-      const [projectData, usageData, fileData, folderData, trashData, memberData, activityData] = await Promise.all([
+      const [projectData, usageData, operationData, fileData, folderData, trashData, memberData, activityData] = await Promise.all([
         projectApi.get(projectId), projectApi.getUsage(projectId),
+        projectApi.getOperations(projectId).catch(() => null),
         projectApi.listFiles(projectId, { ...fileFilters, folder_id: currentFolderId || 'root' }),
         projectApi.listFolders(projectId, currentFolderId), projectApi.listTrash(projectId),
         projectApi.listMembers(projectId),
@@ -87,6 +89,7 @@ export default function ProjectDetailPage() {
       ]);
       setProject(projectData);
       setUsage(usageData);
+      setOperations(operationData);
       setFiles(fileData.files);
       setFolders(folderData.folders);
       setSelectedFileIds(new Set());
@@ -487,6 +490,32 @@ export default function ProjectDetailPage() {
       )}
 
       {error && <div className="flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-300"><span className="flex items-center gap-3"><AlertCircle size={18} />{error}</span><button onClick={() => setError('')}><X size={17} /></button></div>}
+
+      {operations && operations.health_status !== 'unknown' && (
+        <div className={`rounded-xl border p-4 ${
+          operations.health_status === 'critical'
+            ? 'border-red-500/30 bg-red-500/10 text-red-200'
+            : operations.health_status === 'warning'
+              ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+              : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
+        }`}>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <span className="inline-flex items-center gap-2 font-medium">
+              <Shield size={18} /> Operational health: {operations.health_status}
+            </span>
+            <span className="text-xs opacity-70">Checked {formatDate(operations.checked_at)}</span>
+          </div>
+          {operations.health_status !== 'healthy' && (
+            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs opacity-90">
+              <span>Missing objects: {operations.missing_objects || 0}</span>
+              <span>Orphan objects: {operations.orphan_objects || 0}</span>
+              <span>Stale uploads: {operations.stale_uploads || 0}</span>
+              <span>Expired files: {operations.expired_files || 0}</span>
+              <span>Usage drift: {formatBytes(Math.abs(operations.usage_drift_bytes || 0))}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2 overflow-x-auto border-b border-gray-800">
         {tabs.map((item) => <button key={item.id} onClick={() => setTab(item.id)} className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm ${tab === item.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-gray-400 hover:text-white'}`}>{item.label}</button>)}

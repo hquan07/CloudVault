@@ -257,6 +257,20 @@ export interface ProjectUsage {
   warning_percent: number;
 }
 
+export interface ProjectOperationStatus {
+  project_id: string;
+  health_status: 'healthy' | 'warning' | 'critical' | 'unknown';
+  metadata_bytes?: number;
+  object_bytes?: number;
+  usage_drift_bytes?: number;
+  missing_objects?: number;
+  orphan_objects?: number;
+  stale_uploads?: number;
+  expired_files?: number;
+  details: Record<string, unknown>;
+  checked_at: string | null;
+}
+
 export interface ProjectFileFilters {
   q?: string;
   artifact_type?: string;
@@ -383,6 +397,9 @@ export const projectApi = {
 
   getUsage: (projectId: string) =>
     request<ProjectUsage>(`${FILE_BASE}/projects/${projectId}/usage`),
+
+  getOperations: (projectId: string) =>
+    request<ProjectOperationStatus>(`${FILE_BASE}/projects/${projectId}/operations`),
 
   listFiles: (projectId: string, filters: ProjectFileFilters = {}) => {
     const query = new URLSearchParams();
