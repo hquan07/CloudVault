@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     MYSQL_PASSWORD: str = Field(min_length=32)
     MYSQL_HOST: str = "mysql"
     MYSQL_PORT: int = 3306
+    DB_POOL_SIZE: int = Field(default=10, ge=1, le=100)
+    DB_MAX_OVERFLOW: int = Field(default=5, ge=0, le=100)
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=60)
 
     # Redis
     REDIS_PASSWORD: str = Field(min_length=32)

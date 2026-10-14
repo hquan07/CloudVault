@@ -17,6 +17,7 @@ Endpoints matching the frontend api.ts contract:
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -47,6 +48,8 @@ from app.models import (
     User, File, Folder, FileVersion, Project, ProjectMembership,
     ProjectFileStar, ServiceAccount, ProjectUpload, ProjectOperationStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── Global clients ──
 minio_client: Minio | None = None
@@ -106,10 +109,15 @@ async def lifespan(app: FastAPI):
     try:
         kafka_producer = AIOKafkaProducer(
             bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+            client_id=f"file-service-{os.getenv('HOSTNAME', 'local')}",
+            acks="all",
+            enable_idempotence=True,
+            key_serializer=lambda value: value.encode("utf-8"),
             value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
         )
         await kafka_producer.start()
     except Exception:
+        logger.exception("Kafka producer is unavailable; domain events are disabled")
         kafka_producer = None
 
     reconciliation_task = asyncio.create_task(_project_upload_reconciliation_loop())
@@ -212,13 +220,28 @@ async def get_current_user(
 
 async def _emit_event(event_type: str, data: dict):
     if kafka_producer:
+        payload = {
+            "event_id": str(uuid.uuid4()),
+            "event_version": 1,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "event": event_type,
+            **data,
+        }
+        event_key = str(
+            data.get("file_id")
+            or data.get("project_id")
+            or data.get("folder_id")
+            or data.get("user_id")
+            or payload["event_id"]
+        )
         try:
             await kafka_producer.send_and_wait(
                 settings.KAFKA_TOPIC_FILE_EVENTS,
-                {"event": event_type, **data},
+                payload,
+                key=event_key,
             )
         except Exception:
-            pass  # Non-critical
+            logger.exception("Failed to publish %s event %s", event_type, payload["event_id"])
 
 
 def _file_to_dict(f: File) -> dict:
