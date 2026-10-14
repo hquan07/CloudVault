@@ -266,10 +266,13 @@ export interface ProjectFile {
   status: string;
   is_deleted: boolean;
   deleted_at: string | null;
+  is_starred: boolean;
   metadata: Record<string, unknown>;
   retention_until: string | null;
   created_at: string;
   updated_at: string;
+  project_name?: string;
+  project_slug?: string;
 }
 
 export interface ProjectMember {
@@ -414,6 +417,21 @@ export const projectApi = {
       `${FILE_BASE}/projects/${projectId}/files/${fileId}/permanent`,
       { method: 'DELETE' },
     ),
+
+  starFile: (projectId: string, fileId: string) =>
+    request<{ file_id: string; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/star`,
+      { method: 'POST' },
+    ),
+
+  unstarFile: (projectId: string, fileId: string) =>
+    request<{ file_id: string; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/star`,
+      { method: 'DELETE' },
+    ),
+
+  listStarredFiles: () =>
+    request<{ files: ProjectFile[] }>(`${FILE_BASE}/files/project-starred`),
 
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),

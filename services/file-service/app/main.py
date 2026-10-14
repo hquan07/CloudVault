@@ -39,7 +39,7 @@ from app.config import settings
 from app.database import get_db, async_session
 from app.models import (
     User, File, Folder, FileVersion, Project, ProjectMembership,
-    ServiceAccount, ProjectUpload,
+    ProjectFileStar, ServiceAccount, ProjectUpload,
 )
 
 # ── Global clients ──
@@ -183,7 +183,7 @@ def _file_to_dict(f: File) -> dict:
     }
 
 
-def _project_file_to_dict(f: File) -> dict:
+def _project_file_to_dict(f: File, *, is_starred: bool = False) -> dict:
     return {
         "id": f.id,
         # Stable integration contract for machine clients. Keep ``id`` for
@@ -197,6 +197,7 @@ def _project_file_to_dict(f: File) -> dict:
         "status": f.status,
         "is_deleted": f.is_deleted,
         "deleted_at": f.deleted_at.isoformat() if f.deleted_at else None,
+        "is_starred": is_starred,
         "metadata": f.metadata_json or {},
         "retention_until": f.retention_until.isoformat() if f.retention_until else None,
         "created_at": f.created_at.isoformat() if f.created_at else None,
@@ -206,6 +207,22 @@ def _project_file_to_dict(f: File) -> dict:
 
 def _api_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+async def _project_starred_ids(
+    db: AsyncSession,
+    user_id: str | None,
+    file_ids: list[str],
+) -> set[str]:
+    if not user_id or not file_ids:
+        return set()
+    result = await db.execute(
+        select(ProjectFileStar.file_id).where(
+            ProjectFileStar.user_id == user_id,
+            ProjectFileStar.file_id.in_(file_ids),
+        )
+    )
+    return set(result.scalars().all())
 
 
 @dataclass
@@ -444,8 +461,20 @@ async def list_project_files(
         .offset(offset)
     )
     files = result.scalars().all()
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [item.id for item in files],
+    )
     await db.commit()
-    return {"files": [_project_file_to_dict(item) for item in files], "limit": limit, "offset": offset}
+    return {
+        "files": [
+            _project_file_to_dict(item, is_starred=item.id in starred_ids)
+            for item in files
+        ],
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.post("/api/v1/projects/{project_id}/files/upload", status_code=201)
@@ -683,8 +712,81 @@ async def list_project_trash(
         .offset(offset)
     )
     files = result.scalars().all()
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [item.id for item in files],
+    )
     await db.commit()
-    return {"files": [_project_file_to_dict(item) for item in files], "limit": limit, "offset": offset}
+    return {
+        "files": [
+            _project_file_to_dict(item, is_starred=item.id in starred_ids)
+            for item in files
+        ],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/star")
+async def star_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = file_result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    existing = await db.get(ProjectFileStar, (principal.user.id, stored.id))
+    if not existing:
+        db.add(ProjectFileStar(user_id=principal.user.id, file_id=stored.id))
+        await db.commit()
+    return {"file_id": stored.id, "is_starred": True}
+
+
+@app.delete("/api/v1/projects/{project_id}/files/{file_id}/star")
+async def unstar_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_result = await db.execute(
+        select(File.id).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+        )
+    )
+    if not file_result.scalar_one_or_none():
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    existing = await db.get(ProjectFileStar, (principal.user.id, file_id))
+    if existing:
+        await db.delete(existing)
+        await db.commit()
+    return {"file_id": file_id, "is_starred": False}
 
 
 @app.get("/api/v1/projects/{project_id}/files/{file_id}")
@@ -710,8 +812,13 @@ async def get_project_file(
     stored = result.scalar_one_or_none()
     if not stored:
         raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
     await db.commit()
-    return _project_file_to_dict(stored)
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
 
 
 @app.get("/api/v1/projects/{project_id}/files/{file_id}/download")
@@ -826,6 +933,11 @@ async def restore_project_file(
     stored.deleted_at = None
     await db.commit()
     await db.refresh(stored)
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
     await _emit_event("FILE_RESTORED", {
         "file_id": stored.id,
         "user_id": principal.user.id if principal.user else None,
@@ -833,7 +945,7 @@ async def restore_project_file(
         "service_account_id": principal.service_account.id if principal.service_account else None,
         "filename": stored.original_name,
     })
-    return _project_file_to_dict(stored)
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
 
 
 @app.delete("/api/v1/projects/{project_id}/files/{file_id}/permanent")
@@ -905,6 +1017,40 @@ async def permanently_delete_project_file(
 # ══════════════════════════════════════════════
 
 import io
+
+@app.get("/api/v1/files/project-starred")
+async def list_starred_project_files(
+    limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = (
+        select(File, Project)
+        .join(ProjectFileStar, ProjectFileStar.file_id == File.id)
+        .join(Project, Project.id == File.project_id)
+        .where(
+            ProjectFileStar.user_id == user.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+        .order_by(ProjectFileStar.created_at.desc())
+        .limit(limit)
+    )
+    if user.role != "admin":
+        query = query.join(
+            ProjectMembership,
+            (ProjectMembership.project_id == Project.id)
+            & (ProjectMembership.user_id == user.id),
+        )
+    result = await db.execute(query)
+    files = []
+    for stored, project in result.all():
+        item = _project_file_to_dict(stored, is_starred=True)
+        item["project_name"] = project.name
+        item["project_slug"] = project.slug
+        files.append(item)
+    return {"files": files}
+
 
 @app.post("/api/v1/files/upload", status_code=201)
 async def upload_file(

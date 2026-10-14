@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
-  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Shield, Trash2, Upload, UserPlus, X,
+  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Shield, Star, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
@@ -203,6 +203,16 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const toggleFileStar = async (item: ProjectFile) => {
+    try {
+      if (item.is_starred) await projectApi.unstarFile(projectId, item.id);
+      else await projectApi.starFile(projectId, item.id);
+      setFiles((current) => current.map((file) => (
+        file.id === item.id ? { ...file, is_starred: !item.is_starred } : file
+      )));
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
   const addMember = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -338,7 +348,7 @@ export default function ProjectDetailPage() {
             <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400"><File className="mx-auto mb-3 text-gray-600" size={42} /><p>No files in this project.</p>{!canWrite && <p className="mt-1 text-xs">Your viewer role is read-only.</p>}</div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
-              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
+              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => void toggleFileStar(item)} title={item.is_starred ? 'Remove star' : 'Add star'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${item.is_starred ? 'text-yellow-400' : 'text-gray-400'}`}><Star size={17} className={item.is_starred ? 'fill-current' : ''} /></button><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
             </div>
           )}
         </section>

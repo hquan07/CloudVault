@@ -136,6 +136,14 @@ class FileVersion(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
+class ProjectFileStar(Base):
+    __tablename__ = "project_file_stars"
+
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    file_id = Column(String(36), ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class ProjectUpload(Base):
     __tablename__ = "project_uploads"
 
