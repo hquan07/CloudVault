@@ -263,11 +263,13 @@ export interface ProjectFileFilters {
   starred?: boolean;
   sort_by?: 'created_at' | 'updated_at' | 'name' | 'size' | 'artifact_type';
   sort_order?: 'asc' | 'desc';
+  folder_id?: string;
 }
 
 export interface ProjectFile {
   id: string;
   project_id: string;
+  folder_id: string | null;
   original_name: string;
   mime_type: string;
   size: number;
@@ -282,6 +284,17 @@ export interface ProjectFile {
   updated_at: string;
   project_name?: string;
   project_slug?: string;
+}
+
+export interface ProjectFolder {
+  id: string;
+  project_id: string;
+  name: string;
+  parent_id: string | null;
+  path: string;
+  depth: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ProjectMember {
@@ -381,12 +394,14 @@ export const projectApi = {
     metadata: Record<string, unknown>,
     onProgress: (percent: number) => void,
     signal?: AbortSignal,
+    folderId?: string | null,
   ) => {
     const idempotencyKey = crypto.randomUUID();
     const uploadOnce = () => new Promise<ProjectFile>((resolve, reject) => {
       const formData = new FormData();
       formData.append('file', file, file.name);
       formData.append('metadata_json', JSON.stringify(metadata));
+      if (folderId) formData.append('folder_id', folderId);
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${FILE_BASE}/projects/${projectId}/files/upload`);
@@ -477,6 +492,28 @@ export const projectApi = {
       `${FILE_BASE}/projects/${projectId}/files/bulk-delete`,
       { method: 'POST', body: JSON.stringify({ file_ids: fileIds }) },
     ),
+
+  listFolders: (projectId: string, parentId?: string | null) => {
+    const suffix = parentId ? `?parent_id=${encodeURIComponent(parentId)}` : '';
+    return request<{ folders: ProjectFolder[] }>(
+      `${FILE_BASE}/projects/${projectId}/folders${suffix}`,
+    );
+  },
+
+  createFolder: (projectId: string, name: string, parentId?: string | null) =>
+    request<ProjectFolder>(`${FILE_BASE}/projects/${projectId}/folders`, {
+      method: 'POST', body: JSON.stringify({ name, parent_id: parentId || null }),
+    }),
+
+  deleteFolder: (projectId: string, folderId: string) =>
+    request<{ detail: string }>(`${FILE_BASE}/projects/${projectId}/folders/${folderId}`, {
+      method: 'DELETE',
+    }),
+
+  moveFile: (projectId: string, fileId: string, folderId?: string | null) =>
+    request<ProjectFile>(`${FILE_BASE}/projects/${projectId}/files/${fileId}/move`, {
+      method: 'POST', body: JSON.stringify({ folder_id: folderId || null }),
+    }),
 
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),

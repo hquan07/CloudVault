@@ -191,6 +191,7 @@ def _project_file_to_dict(f: File, *, is_starred: bool = False) -> dict:
         # backwards compatibility with the existing web application.
         "file_id": f.id,
         "project_id": f.project_id,
+        "folder_id": f.folder_id,
         "original_name": f.original_name,
         "mime_type": f.mime_type,
         "size": f.size,
@@ -240,6 +241,15 @@ class ProjectBulkFilesRequest(BaseModel):
 
 class ProjectBulkStarRequest(ProjectBulkFilesRequest):
     starred: bool
+
+
+class ProjectFolderCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    parent_id: str | None = None
+
+
+class ProjectFileMoveRequest(BaseModel):
+    folder_id: str | None = None
 
 
 async def _resolve_project_principal(
@@ -314,6 +324,37 @@ async def _resolve_project_principal(
     if not membership or membership.role not in user_roles:
         raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project role is insufficient")
     return ProjectPrincipal(project=project, user=user, member_role=membership.role)
+
+
+def _project_folder_to_dict(folder: Folder) -> dict:
+    return {
+        "id": folder.id,
+        "project_id": folder.project_id,
+        "name": folder.name,
+        "parent_id": folder.parent_id,
+        "path": folder.path,
+        "depth": folder.depth,
+        "created_at": folder.created_at.isoformat() if folder.created_at else None,
+        "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
+    }
+
+
+async def _get_project_folder(
+    db: AsyncSession,
+    project_id: str,
+    folder_id: str,
+) -> Folder:
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.project_id == project_id,
+            Folder.is_deleted == False,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise _api_error(404, "FOLDER_NOT_FOUND", "Project folder not found")
+    return folder
 
 
 def _project_retention_until(project: Project, metadata: dict) -> datetime | None:
@@ -445,6 +486,110 @@ async def get_project_usage(
     }
 
 
+@app.get("/api/v1/projects/{project_id}/folders")
+async def list_project_folders(
+    project_id: str,
+    parent_id: str | None = Query(None),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if parent_id:
+        await _get_project_folder(db, principal.project.id, parent_id)
+    query = select(Folder).where(
+        Folder.project_id == principal.project.id,
+        Folder.is_deleted == False,
+    )
+    query = query.where(Folder.parent_id == parent_id) if parent_id else query.where(Folder.parent_id.is_(None))
+    result = await db.execute(query.order_by(Folder.name.asc()))
+    folders = result.scalars().all()
+    await db.commit()
+    return {"folders": [_project_folder_to_dict(folder) for folder in folders]}
+
+
+@app.post("/api/v1/projects/{project_id}/folders", status_code=201)
+async def create_project_folder(
+    project_id: str,
+    req: ProjectFolderCreateRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    name = req.name.strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise _api_error(400, "INVALID_FOLDER", "Folder name is invalid")
+    parent = await _get_project_folder(db, principal.project.id, req.parent_id) if req.parent_id else None
+    depth = parent.depth + 1 if parent else 0
+    if depth > 32:
+        raise _api_error(400, "INVALID_FOLDER", "Maximum project folder depth is 32")
+    path = f"{parent.path.rstrip('/') if parent else ''}/{name}"
+    if len(path) > 2000:
+        raise _api_error(400, "INVALID_FOLDER", "Folder path is too long")
+    duplicate_query = select(Folder.id).where(
+        Folder.project_id == principal.project.id,
+        Folder.name == name,
+        Folder.is_deleted == False,
+    )
+    duplicate_query = duplicate_query.where(Folder.parent_id == parent.id) if parent else duplicate_query.where(Folder.parent_id.is_(None))
+    if await db.scalar(duplicate_query):
+        raise _api_error(409, "FOLDER_EXISTS", "A folder with this name already exists")
+
+    folder = Folder(
+        name=name,
+        parent_id=parent.id if parent else None,
+        user_id=principal.user.id if principal.user else None,
+        project_id=principal.project.id,
+        created_by_service_account_id=principal.service_account.id if principal.service_account else None,
+        path=path,
+        depth=depth,
+    )
+    db.add(folder)
+    await db.commit()
+    await db.refresh(folder)
+    return _project_folder_to_dict(folder)
+
+
+@app.delete("/api/v1/projects/{project_id}/folders/{folder_id}")
+async def delete_project_folder(
+    project_id: str,
+    folder_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    folder = await _get_project_folder(db, principal.project.id, folder_id)
+    child_count = await db.scalar(
+        select(func.count()).select_from(Folder).where(
+            Folder.parent_id == folder.id,
+            Folder.is_deleted == False,
+        )
+    )
+    file_count = await db.scalar(
+        select(func.count()).select_from(File).where(File.folder_id == folder.id)
+    )
+    if child_count or file_count:
+        raise _api_error(409, "FOLDER_NOT_EMPTY", "Move or delete folder contents first")
+    await db.delete(folder)
+    await db.commit()
+    return {"detail": "Project folder deleted"}
+
+
 @app.get("/api/v1/projects/{project_id}/files")
 async def list_project_files(
     project_id: str,
@@ -452,6 +597,7 @@ async def list_project_files(
     offset: int = Query(0, ge=0),
     q: str | None = Query(None, max_length=255),
     artifact_type: str | None = Query(None, max_length=120),
+    folder_id: str | None = Query(None),
     starred: bool | None = Query(None),
     sort_by: str = Query("created_at"),
     sort_order: str = Query("desc"),
@@ -473,6 +619,11 @@ async def list_project_files(
     artifact_expression = func.JSON_UNQUOTE(func.JSON_EXTRACT(File.metadata_json, "$.artifact_type"))
     if artifact_type:
         query = query.where(artifact_expression == artifact_type.strip())
+    if folder_id == "root":
+        query = query.where(File.folder_id.is_(None))
+    elif folder_id:
+        await _get_project_folder(db, principal.project.id, folder_id)
+        query = query.where(File.folder_id == folder_id)
     if starred is not None:
         if not principal.user:
             raise _api_error(400, "INVALID_FILTER", "Star filtering is available to users only")
@@ -525,6 +676,7 @@ async def upload_project_file(
     project_id: str,
     file: UploadFile,
     metadata_json: str = Form(...),
+    folder_id: str | None = Form(None),
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     authorization: str = Header(None),
     db: AsyncSession = Depends(get_db),
@@ -537,6 +689,9 @@ async def upload_project_file(
     project = principal.project
     if project.status != "active":
         raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    destination_folder = None
+    if folder_id:
+        destination_folder = await _get_project_folder(db, project.id, folder_id)
     if not idempotency_key or len(idempotency_key) > 255:
         raise _api_error(400, "INVALID_FILE", "Idempotency-Key is required and must be at most 255 characters")
     if len(metadata_json.encode("utf-8")) > 16384:
@@ -679,6 +834,7 @@ async def upload_project_file(
         original_name=original_name,
         mime_type=content_type,
         size=file_size,
+        folder_id=destination_folder.id if destination_folder else None,
         user_id=principal.user.id if principal.user else None,
         project_id=locked_project.id,
         created_by_service_account_id=principal.service_account.id if principal.service_account else None,
@@ -921,6 +1077,44 @@ async def bulk_delete_project_files(
             "filename": stored.original_name,
         })
     return {"file_ids": file_ids, "detail": "Project files moved to trash"}
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/move")
+async def move_project_file(
+    project_id: str,
+    file_id: str,
+    req: ProjectFileMoveRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    destination = await _get_project_folder(db, principal.project.id, req.folder_id) if req.folder_id else None
+    stored.folder_id = destination.id if destination else None
+    await db.commit()
+    await db.refresh(stored)
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
 
 
 @app.get("/api/v1/projects/{project_id}/files/{file_id}")

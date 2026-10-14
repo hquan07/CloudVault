@@ -5,11 +5,12 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
-  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Save, Search, Shield, Star, Trash2, Upload, UserPlus, X,
+  Folder, FolderPlus, HardDrive, Home, KeyRound, Loader2, RefreshCw, RotateCcw,
+  Save, Search, Shield, Star, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
-  ApiError, Project, ProjectFile, ProjectFileFilters, ProjectMember, ProjectUsage,
-  ServiceAccount, projectApi,
+  ApiError, Project, ProjectFile, ProjectFileFilters, ProjectFolder, ProjectMember,
+  ProjectUsage, ServiceAccount, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
@@ -41,6 +42,9 @@ export default function ProjectDetailPage() {
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [trash, setTrash] = useState<ProjectFile[]>([]);
+  const [folders, setFolders] = useState<ProjectFolder[]>([]);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [folderPath, setFolderPath] = useState<ProjectFolder[]>([]);
   const [previewFile, setPreviewFile] = useState<ProjectFile | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
@@ -66,14 +70,16 @@ export default function ProjectDetailPage() {
   const loadData = useCallback(async () => {
     try {
       setError('');
-      const [projectData, usageData, fileData, trashData, memberData] = await Promise.all([
+      const [projectData, usageData, fileData, folderData, trashData, memberData] = await Promise.all([
         projectApi.get(projectId), projectApi.getUsage(projectId),
-        projectApi.listFiles(projectId, fileFilters), projectApi.listTrash(projectId),
+        projectApi.listFiles(projectId, { ...fileFilters, folder_id: currentFolderId || 'root' }),
+        projectApi.listFolders(projectId, currentFolderId), projectApi.listTrash(projectId),
         projectApi.listMembers(projectId),
       ]);
       setProject(projectData);
       setUsage(usageData);
       setFiles(fileData.files);
+      setFolders(folderData.folders);
       setSelectedFileIds(new Set());
       setTrash(trashData.files);
       setMembers(memberData);
@@ -85,7 +91,7 @@ export default function ProjectDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [fileFilters, projectId]);
+  }, [currentFolderId, fileFilters, projectId]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -156,7 +162,7 @@ export default function ProjectDetailPage() {
         retention_class: String(form.get('retention_class')),
         logical_date: new Date().toISOString(),
         source_run_id: crypto.randomUUID(),
-      }, setUploadProgress);
+      }, setUploadProgress, undefined, currentFolderId);
       formElement.reset();
       await loadData();
     } catch (err) {
@@ -274,6 +280,47 @@ export default function ProjectDetailPage() {
       q: searchDraft.trim() || undefined,
       artifact_type: artifactDraft.trim() || undefined,
     }));
+  };
+
+  const openFolder = (folder: ProjectFolder) => {
+    setFolderPath((current) => [...current, folder]);
+    setCurrentFolderId(folder.id);
+  };
+
+  const openFolderLevel = (index: number) => {
+    if (index < 0) {
+      setFolderPath([]);
+      setCurrentFolderId(null);
+      return;
+    }
+    setFolderPath((current) => current.slice(0, index + 1));
+    setCurrentFolderId(folderPath[index].id);
+  };
+
+  const createFolder = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    try {
+      await projectApi.createFolder(projectId, String(form.get('name')), currentFolderId);
+      formElement.reset();
+      await loadData();
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const deleteFolder = async (folder: ProjectFolder) => {
+    if (!window.confirm(`Delete empty folder ${folder.name}?`)) return;
+    try {
+      await projectApi.deleteFolder(projectId, folder.id);
+      setFolders((current) => current.filter((item) => item.id !== folder.id));
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const moveFile = async (item: ProjectFile, destinationId: string) => {
+    try {
+      await projectApi.moveFile(projectId, item.id, destinationId || null);
+      await loadData();
+    } catch (err) { setError(errorMessage(err)); }
   };
 
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
@@ -429,6 +476,20 @@ export default function ProjectDetailPage() {
 
       {tab === 'files' && (
         <section className="space-y-5">
+          <div className="flex flex-col gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between">
+            <nav className="flex flex-wrap items-center gap-1 text-sm">
+              <button onClick={() => openFolderLevel(-1)} className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-gray-400 hover:bg-gray-800 hover:text-cyan-300"><Home size={15} /> Root</button>
+              {folderPath.map((folder, index) => <span key={folder.id} className="inline-flex items-center"><span className="text-gray-700">/</span><button onClick={() => openFolderLevel(index)} className="rounded-lg px-2 py-1.5 text-gray-400 hover:bg-gray-800 hover:text-cyan-300">{folder.name}</button></span>)}
+            </nav>
+            {canWrite && <form onSubmit={createFolder} className="flex gap-2"><input required name="name" maxLength={255} placeholder="New folder" className="min-w-0 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" /><button className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/30 px-3 py-2 text-sm text-cyan-300 hover:bg-cyan-500/10"><FolderPlus size={16} /> Create</button></form>}
+          </div>
+
+          {folders.length > 0 && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {folders.map((folder) => <div key={folder.id} className="group flex items-center justify-between rounded-xl border border-gray-800 bg-gray-900 p-3 hover:border-cyan-500/30"><button onClick={() => openFolder(folder)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><span className="rounded-lg bg-cyan-500/10 p-2 text-cyan-400"><Folder size={18} /></span><span className="truncate text-sm font-medium text-gray-200">{folder.name}</span></button>{canWrite && <button onClick={() => void deleteFolder(folder)} title="Delete empty folder" className="rounded-lg p-2 text-gray-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"><Trash2 size={15} /></button>}</div>)}
+            </div>
+          )}
+
           <form onSubmit={applyFileSearch} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-4 lg:grid-cols-[minmax(220px,1fr)_180px_150px_160px_120px_auto] lg:items-end">
             <label className="text-sm text-gray-300">Search<input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="File name" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
             <label className="text-sm text-gray-300">Artifact type<input value={artifactDraft} onChange={(event) => setArtifactDraft(event.target.value)} placeholder="report" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
@@ -476,7 +537,7 @@ export default function ProjectDetailPage() {
                         <td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td>
                         <td className="p-4 text-gray-400">{formatBytes(item.size)}</td>
                         <td className="p-4 text-gray-400">{formatDate(item.created_at)}</td>
-                        <td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => void toggleFileStar(item)} title={item.is_starred ? 'Remove star' : 'Add star'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${item.is_starred ? 'text-yellow-400' : 'text-gray-400'}`}><Star size={17} className={item.is_starred ? 'fill-current' : ''} /></button><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td>
+                        <td className="p-4"><div className="flex justify-end gap-1">{canWrite && <select value="current" onChange={(event) => { if (event.target.value !== 'current') void moveFile(item, event.target.value); }} title="Move file" className="max-w-28 rounded-lg border border-gray-700 bg-gray-950 px-2 text-xs text-gray-400"><option value="current" disabled>Move…</option><option value="">Root</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select>}<button onClick={() => void toggleFileStar(item)} title={item.is_starred ? 'Remove star' : 'Add star'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${item.is_starred ? 'text-yellow-400' : 'text-gray-400'}`}><Star size={17} className={item.is_starred ? 'fill-current' : ''} /></button><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td>
                       </tr>
                     ))}
                   </tbody>
