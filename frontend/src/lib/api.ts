@@ -257,6 +257,14 @@ export interface ProjectUsage {
   warning_percent: number;
 }
 
+export interface ProjectFileFilters {
+  q?: string;
+  artifact_type?: string;
+  starred?: boolean;
+  sort_by?: 'created_at' | 'updated_at' | 'name' | 'size' | 'artifact_type';
+  sort_order?: 'asc' | 'desc';
+}
+
 export interface ProjectFile {
   id: string;
   project_id: string;
@@ -351,10 +359,16 @@ export const projectApi = {
   getUsage: (projectId: string) =>
     request<ProjectUsage>(`${FILE_BASE}/projects/${projectId}/usage`),
 
-  listFiles: (projectId: string) =>
-    request<{ files: ProjectFile[]; limit: number; offset: number }>(
-      `${FILE_BASE}/projects/${projectId}/files`
-    ),
+  listFiles: (projectId: string, filters: ProjectFileFilters = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') query.set(key, String(value));
+    });
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return request<{ files: ProjectFile[]; limit: number; offset: number; total: number }>(
+      `${FILE_BASE}/projects/${projectId}/files${suffix}`
+    );
+  },
 
   listTrash: (projectId: string) =>
     request<{ files: ProjectFile[]; limit: number; offset: number }>(
@@ -451,6 +465,18 @@ export const projectApi = {
 
   listStarredFiles: () =>
     request<{ files: ProjectFile[] }>(`${FILE_BASE}/files/project-starred`),
+
+  bulkStarFiles: (projectId: string, fileIds: string[], starred: boolean) =>
+    request<{ file_ids: string[]; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/bulk-star`,
+      { method: 'POST', body: JSON.stringify({ file_ids: fileIds, starred }) },
+    ),
+
+  bulkDeleteFiles: (projectId: string, fileIds: string[]) =>
+    request<{ file_ids: string[]; detail: string }>(
+      `${FILE_BASE}/projects/${projectId}/files/bulk-delete`,
+      { method: 'POST', body: JSON.stringify({ file_ids: fileIds }) },
+    ),
 
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),

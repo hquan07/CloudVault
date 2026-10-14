@@ -30,6 +30,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from minio import Minio
+from pydantic import BaseModel, Field
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -231,6 +232,14 @@ class ProjectPrincipal:
     user: User | None = None
     service_account: ServiceAccount | None = None
     member_role: str | None = None
+
+
+class ProjectBulkFilesRequest(BaseModel):
+    file_ids: list[str] = Field(..., min_length=1, max_length=500)
+
+
+class ProjectBulkStarRequest(ProjectBulkFilesRequest):
+    starred: bool
 
 
 async def _resolve_project_principal(
@@ -441,6 +450,11 @@ async def list_project_files(
     project_id: str,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    q: str | None = Query(None, max_length=255),
+    artifact_type: str | None = Query(None, max_length=120),
+    starred: bool | None = Query(None),
+    sort_by: str = Query("created_at"),
+    sort_order: str = Query("desc"),
     authorization: str = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -449,17 +463,45 @@ async def list_project_files(
         service_scope="files:read",
         user_roles={"viewer", "editor", "admin"},
     )
-    result = await db.execute(
-        select(File)
-        .where(
-            File.project_id == principal.project.id,
-            File.status == "AVAILABLE",
-            File.is_deleted == False,
-        )
-        .order_by(File.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+    query = select(File).where(
+        File.project_id == principal.project.id,
+        File.status == "AVAILABLE",
+        File.is_deleted == False,
     )
+    if q:
+        query = query.where(File.original_name.ilike(f"%{q.strip()}%"))
+    artifact_expression = func.JSON_UNQUOTE(func.JSON_EXTRACT(File.metadata_json, "$.artifact_type"))
+    if artifact_type:
+        query = query.where(artifact_expression == artifact_type.strip())
+    if starred is not None:
+        if not principal.user:
+            raise _api_error(400, "INVALID_FILTER", "Star filtering is available to users only")
+        if starred:
+            query = query.join(
+                ProjectFileStar,
+                (ProjectFileStar.file_id == File.id)
+                & (ProjectFileStar.user_id == principal.user.id),
+            )
+        else:
+            query = query.outerjoin(
+                ProjectFileStar,
+                (ProjectFileStar.file_id == File.id)
+                & (ProjectFileStar.user_id == principal.user.id),
+            ).where(ProjectFileStar.file_id.is_(None))
+
+    sort_columns = {
+        "created_at": File.created_at,
+        "updated_at": File.updated_at,
+        "name": File.original_name,
+        "size": File.size,
+        "artifact_type": artifact_expression,
+    }
+    if sort_by not in sort_columns or sort_order not in {"asc", "desc"}:
+        raise _api_error(400, "INVALID_FILTER", "Invalid project file sort")
+    total = await db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    sort_column = sort_columns[sort_by]
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc())
+    result = await db.execute(query.limit(limit).offset(offset))
     files = result.scalars().all()
     starred_ids = await _project_starred_ids(
         db,
@@ -474,6 +516,7 @@ async def list_project_files(
         ],
         "limit": limit,
         "offset": offset,
+        "total": total,
     }
 
 
@@ -787,6 +830,97 @@ async def unstar_project_file(
         await db.delete(existing)
         await db.commit()
     return {"file_id": file_id, "is_starred": False}
+
+
+@app.post("/api/v1/projects/{project_id}/files/bulk-star")
+async def bulk_star_project_files(
+    project_id: str,
+    req: ProjectBulkStarRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_ids = list(dict.fromkeys(req.file_ids))
+    files_result = await db.execute(
+        select(File.id).where(
+            File.id.in_(file_ids),
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    matched_ids = set(files_result.scalars().all())
+    if matched_ids != set(file_ids):
+        raise _api_error(404, "FILE_NOT_FOUND", "One or more project files were not found")
+
+    stars_result = await db.execute(
+        select(ProjectFileStar).where(
+            ProjectFileStar.user_id == principal.user.id,
+            ProjectFileStar.file_id.in_(file_ids),
+        )
+    )
+    existing_stars = stars_result.scalars().all()
+    if req.starred:
+        existing_ids = {item.file_id for item in existing_stars}
+        db.add_all([
+            ProjectFileStar(user_id=principal.user.id, file_id=file_id)
+            for file_id in file_ids if file_id not in existing_ids
+        ])
+    else:
+        for item in existing_stars:
+            await db.delete(item)
+    await db.commit()
+    return {"file_ids": file_ids, "is_starred": req.starred}
+
+
+@app.post("/api/v1/projects/{project_id}/files/bulk-delete")
+async def bulk_delete_project_files(
+    project_id: str,
+    req: ProjectBulkFilesRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    file_ids = list(dict.fromkeys(req.file_ids))
+    result = await db.execute(
+        select(File).where(
+            File.id.in_(file_ids),
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored_files = result.scalars().all()
+    if {item.id for item in stored_files} != set(file_ids):
+        raise _api_error(404, "FILE_NOT_FOUND", "One or more project files were not found")
+
+    deleted_at = datetime.now(timezone.utc)
+    for stored in stored_files:
+        stored.is_deleted = True
+        stored.status = "DELETED"
+        stored.deleted_at = deleted_at
+    await db.commit()
+    for stored in stored_files:
+        await _emit_event("FILE_DELETED", {
+            "file_id": stored.id,
+            "user_id": principal.user.id if principal.user else None,
+            "project_id": principal.project.id,
+            "service_account_id": principal.service_account.id if principal.service_account else None,
+            "filename": stored.original_name,
+        })
+    return {"file_ids": file_ids, "detail": "Project files moved to trash"}
 
 
 @app.get("/api/v1/projects/{project_id}/files/{file_id}")
@@ -1668,7 +1802,6 @@ async def list_folders(
     }
 
 from app.models import FolderPermission
-from pydantic import BaseModel
 
 class ShareFolderRequest(BaseModel):
     user_email: str

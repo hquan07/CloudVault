@@ -5,10 +5,11 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
-  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Save, Shield, Star, Trash2, Upload, UserPlus, X,
+  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Save, Search, Shield, Star, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
-  ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
+  ApiError, Project, ProjectFile, ProjectFileFilters, ProjectMember, ProjectUsage,
+  ServiceAccount, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
@@ -55,18 +56,25 @@ export default function ProjectDetailPage() {
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
+  const [searchDraft, setSearchDraft] = useState('');
+  const [artifactDraft, setArtifactDraft] = useState('');
+  const [fileFilters, setFileFilters] = useState<ProjectFileFilters>({
+    sort_by: 'created_at', sort_order: 'desc',
+  });
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
 
   const loadData = useCallback(async () => {
     try {
       setError('');
       const [projectData, usageData, fileData, trashData, memberData] = await Promise.all([
         projectApi.get(projectId), projectApi.getUsage(projectId),
-        projectApi.listFiles(projectId), projectApi.listTrash(projectId),
+        projectApi.listFiles(projectId, fileFilters), projectApi.listTrash(projectId),
         projectApi.listMembers(projectId),
       ]);
       setProject(projectData);
       setUsage(usageData);
       setFiles(fileData.files);
+      setSelectedFileIds(new Set());
       setTrash(trashData.files);
       setMembers(memberData);
       if (projectData.member_role === 'admin') {
@@ -77,7 +85,7 @@ export default function ProjectDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [fileFilters, projectId]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -180,6 +188,11 @@ export default function ProjectDetailPage() {
     try {
       await projectApi.deleteFile(projectId, item.id);
       setFiles((current) => current.filter((file) => file.id !== item.id));
+      setSelectedFileIds((current) => {
+        const next = new Set(current);
+        next.delete(item.id);
+        return next;
+      });
       setTrash((current) => [{
         ...item,
         status: 'DELETED',
@@ -210,10 +223,57 @@ export default function ProjectDetailPage() {
     try {
       if (item.is_starred) await projectApi.unstarFile(projectId, item.id);
       else await projectApi.starFile(projectId, item.id);
-      setFiles((current) => current.map((file) => (
-        file.id === item.id ? { ...file, is_starred: !item.is_starred } : file
-      )));
+      if (fileFilters.starred !== undefined) await loadData();
+      else {
+        setFiles((current) => current.map((file) => (
+          file.id === item.id ? { ...file, is_starred: !item.is_starred } : file
+        )));
+      }
     } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const toggleFileSelection = (fileId: string) => {
+    setSelectedFileIds((current) => {
+      const next = new Set(current);
+      if (next.has(fileId)) next.delete(fileId);
+      else next.add(fileId);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedFileIds((current) => (
+      files.length > 0 && files.every((file) => current.has(file.id))
+        ? new Set()
+        : new Set(files.map((file) => file.id))
+    ));
+  };
+
+  const bulkStarFiles = async (starred: boolean) => {
+    const fileIds = [...selectedFileIds];
+    if (!fileIds.length) return;
+    try {
+      await projectApi.bulkStarFiles(projectId, fileIds, starred);
+      await loadData();
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const bulkDeleteFiles = async () => {
+    const fileIds = [...selectedFileIds];
+    if (!fileIds.length || !window.confirm(`Move ${fileIds.length} selected files to project trash?`)) return;
+    try {
+      await projectApi.bulkDeleteFiles(projectId, fileIds);
+      await loadData();
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const applyFileSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFileFilters((current) => ({
+      ...current,
+      q: searchDraft.trim() || undefined,
+      artifact_type: artifactDraft.trim() || undefined,
+    }));
   };
 
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
@@ -369,6 +429,26 @@ export default function ProjectDetailPage() {
 
       {tab === 'files' && (
         <section className="space-y-5">
+          <form onSubmit={applyFileSearch} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-4 lg:grid-cols-[minmax(220px,1fr)_180px_150px_160px_120px_auto] lg:items-end">
+            <label className="text-sm text-gray-300">Search<input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="File name" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+            <label className="text-sm text-gray-300">Artifact type<input value={artifactDraft} onChange={(event) => setArtifactDraft(event.target.value)} placeholder="report" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+            <label className="text-sm text-gray-300">Star<select value={fileFilters.starred === undefined ? '' : String(fileFilters.starred)} onChange={(event) => setFileFilters((current) => ({ ...current, starred: event.target.value === '' ? undefined : event.target.value === 'true' }))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="">All</option><option value="true">Starred</option><option value="false">Not starred</option></select></label>
+            <label className="text-sm text-gray-300">Sort by<select value={fileFilters.sort_by} onChange={(event) => setFileFilters((current) => ({ ...current, sort_by: event.target.value as ProjectFileFilters['sort_by'] }))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="created_at">Uploaded</option><option value="updated_at">Updated</option><option value="name">Name</option><option value="size">Size</option><option value="artifact_type">Artifact</option></select></label>
+            <label className="text-sm text-gray-300">Order<select value={fileFilters.sort_order} onChange={(event) => setFileFilters((current) => ({ ...current, sort_order: event.target.value as ProjectFileFilters['sort_order'] }))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
+            <div className="flex gap-2"><button className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-500 px-3 py-2 font-medium text-gray-950"><Search size={16} /> Apply</button><button type="button" onClick={() => { setSearchDraft(''); setArtifactDraft(''); setFileFilters({ sort_by: 'created_at', sort_order: 'desc' }); }} title="Clear filters" className="rounded-lg border border-gray-700 p-2 text-gray-400 hover:text-white"><X size={17} /></button></div>
+          </form>
+
+          {selectedFileIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3">
+              <span className="text-sm text-cyan-200">{selectedFileIds.size} selected</span>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => void bulkStarFiles(true)} className="inline-flex items-center gap-2 rounded-lg border border-yellow-500/30 px-3 py-2 text-sm text-yellow-300 hover:bg-yellow-500/10"><Star size={15} /> Star</button>
+                <button onClick={() => void bulkStarFiles(false)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"><Star size={15} /> Unstar</button>
+                {canWrite && <button onClick={() => void bulkDeleteFiles()} className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Move to trash</button>}
+              </div>
+            </div>
+          )}
+
           {canWrite && (
             <form onSubmit={uploadFile} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-5 md:grid-cols-[1fr_180px_180px_auto] md:items-end">
               <label className="text-sm text-gray-300">File<input required name="file" type="file" className="mt-1.5 block w-full rounded-lg border border-gray-700 bg-gray-950 p-2 text-sm text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-500/10 file:px-3 file:py-1 file:text-cyan-300" /></label>
@@ -381,7 +461,27 @@ export default function ProjectDetailPage() {
             <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400"><File className="mx-auto mb-3 text-gray-600" size={42} /><p>No files in this project.</p>{!canWrite && <p className="mt-1 text-xs">Your viewer role is read-only.</p>}</div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
-              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => void toggleFileStar(item)} title={item.is_starred ? 'Remove star' : 'Add star'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${item.is_starred ? 'text-yellow-400' : 'text-gray-400'}`}><Star size={17} className={item.is_starred ? 'fill-current' : ''} /></button><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-gray-800 text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="p-4"><label className="flex items-center gap-3"><input type="checkbox" checked={files.length > 0 && files.every((file) => selectedFileIds.has(file.id))} onChange={toggleSelectAll} className="accent-cyan-500" /> File</label></th>
+                      <th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {files.map((item) => (
+                      <tr key={item.id} className="hover:bg-gray-800/40">
+                        <td className="p-4"><div className="flex items-start gap-3"><input type="checkbox" checked={selectedFileIds.has(item.id)} onChange={() => toggleFileSelection(item.id)} className="mt-1 accent-cyan-500" /><div><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></div></div></td>
+                        <td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td>
+                        <td className="p-4 text-gray-400">{formatBytes(item.size)}</td>
+                        <td className="p-4 text-gray-400">{formatDate(item.created_at)}</td>
+                        <td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => void toggleFileStar(item)} title={item.is_starred ? 'Remove star' : 'Add star'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${item.is_starred ? 'text-yellow-400' : 'text-gray-400'}`}><Star size={17} className={item.is_starred ? 'fill-current' : ''} /></button><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </section>
