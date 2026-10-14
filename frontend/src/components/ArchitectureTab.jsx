@@ -218,6 +218,15 @@ const redLine = { strokeWidth: 2, stroke: '#ef4444' };
 const cyanLine = { strokeWidth: 2, stroke: '#06b6d4' };
 const dashedLine = { strokeDasharray: '5,5' };
 
+const connectionLegend = [
+  { label: 'UI / browser', color: '#3b82f6' },
+  { label: 'External project integration', color: '#8b5cf6' },
+  { label: 'Gateway / synchronous API', color: '#f59e0b' },
+  { label: 'Kafka consumption', color: '#ef4444' },
+  { label: 'Worker / data processing', color: '#10b981' },
+  { label: 'Operations / observability', color: '#06b6d4' },
+];
+
 const initialEdges = [
   // Entry boundaries
   { id: 'e-user-nginx', source: 'user', target: 'nginx', label: 'UI / API / WS', ...defaultEdgeOptions, style: blueLine },
@@ -231,7 +240,7 @@ const initialEdges = [
   { id: 'e-web-api', source: 'web', target: 'api_client', label: 'browser bundle', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
   { id: 'e-projects-api', source: 'projects_ui', target: 'api_client', label: 'project requests', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
   { id: 'e-preview-api', source: 'file_preview', target: 'api_client', label: 'preview / download', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  { id: 'e-api-nginx', source: 'api_client', target: 'nginx', label: 'same-origin REST', ...defaultEdgeOptions, style: { ...blueLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-api-nginx', source: 'api_client', target: 'nginx', label: 'same-origin REST', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
   { id: 'e-nginx-auth', source: 'nginx', target: 'auth', label: 'auth / project access', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
   { id: 'e-nginx-files', source: 'nginx', target: 'files', label: 'file / folder routes', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
   { id: 'e-nginx-meta', source: 'nginx', target: 'metadata', label: 'metadata / search / WS', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
@@ -333,6 +342,24 @@ export default function ArchitectureTab() {
           <span>⚪ Documented component</span>
           <span>Live probes cover Auth, File and Metadata APIs only.</span>
           {lastChecked && <span>Checked {lastChecked.toLocaleTimeString()}</span>}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 16px', marginTop: '12px', color: '#cbd5e1', fontSize: '12px' }}>
+          <span style={{ fontWeight: 700, color: '#f8fafc' }}>Connections</span>
+          {connectionLegend.map((item) => (
+            <span key={item.label} style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
+              <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: `3px solid ${item.color}` }} />
+              {item.label}
+            </span>
+          ))}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
+            <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: '3px solid #94a3b8' }} />
+            Primary request / data path
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
+            <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: '3px dashed #94a3b8' }} />
+            Notification / control / telemetry
+          </span>
+          <span>Arrowheads show flow direction.</span>
         </div>
       </div>
 
