@@ -9,8 +9,10 @@ import os
 import logging
 import io
 
+import asyncmy
 from aiokafka import AIOKafkaConsumer
 from elasticsearch import AsyncElasticsearch
+from elasticsearch.helpers import async_bulk
 from minio import Minio
 import redis.asyncio as aioredis
 
@@ -32,6 +34,12 @@ BUCKET_FILES = os.getenv("MINIO_BUCKET_FILES", "cloudvault-files")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PASSWORD = os.environ["REDIS_PASSWORD"]
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:6379/0"
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "cloudvault")
+MYSQL_USER = os.getenv("MYSQL_USER", "cloudvault")
+MYSQL_PASSWORD = os.environ["MYSQL_PASSWORD"]
 
 def extract_text(file_data: bytes, mime_type: str) -> str:
     text = ""
@@ -89,6 +97,7 @@ async def ensure_index(es: AsyncElasticsearch):
                         "content": {"type": "text", "analyzer": "standard"},
                         "mime_type": {"type": "keyword"},
                         "user_id": {"type": "keyword"},
+                        "project_id": {"type": "keyword"},
                         "folder_id": {"type": "keyword"},
                         "size": {"type": "long"},
                         "is_deleted": {"type": "boolean"},
@@ -99,6 +108,46 @@ async def ensure_index(es: AsyncElasticsearch):
             },
         )
         logger.info(f"Created ES index: {ES_INDEX}")
+    else:
+        await es.indices.put_mapping(
+            index=ES_INDEX,
+            properties={"project_id": {"type": "keyword"}},
+        )
+
+
+async def backfill_project_scope(es: AsyncElasticsearch):
+    """Attach project scope to documents indexed before project-aware search."""
+    connection = await asyncmy.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+    )
+    updated = 0
+    try:
+        async with connection.cursor() as cursor:
+            await cursor.execute("SELECT id, project_id FROM files WHERE project_id IS NOT NULL")
+            while rows := await cursor.fetchmany(500):
+                actions = [
+                    {
+                        "_op_type": "update",
+                        "_index": ES_INDEX,
+                        "_id": file_id,
+                        "doc": {"project_id": project_id},
+                    }
+                    for file_id, project_id in rows
+                ]
+                succeeded, _ = await async_bulk(
+                    es,
+                    actions,
+                    raise_on_error=False,
+                    raise_on_exception=False,
+                )
+                updated += succeeded
+    finally:
+        connection.close()
+    logger.info("Backfilled project scope on %s existing search documents", updated)
 
 
 async def main():
@@ -113,6 +162,10 @@ async def main():
     
     es = AsyncElasticsearch(ES_URL, basic_auth=(ES_USERNAME, ES_PASSWORD))
     await ensure_index(es)
+    try:
+        await backfill_project_scope(es)
+    except Exception as error:
+        logger.warning("Project scope backfill skipped: %s", error)
 
     consumer = AIOKafkaConsumer(
         KAFKA_TOPIC,
@@ -139,6 +192,7 @@ async def main():
                     "original_name": data.get("filename", ""),
                     "mime_type": data.get("mime_type", ""),
                     "user_id": data.get("user_id", ""),
+                    "project_id": data.get("project_id"),
                     "size": data.get("size", 0),
                     "is_deleted": False,
                     "created_at": data.get("created_at"),

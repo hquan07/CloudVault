@@ -44,7 +44,7 @@ from app.dependencies import (
 )
 from app.models import (
     User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily,
-    FolderPermission, Project, ProjectMembership,
+    FolderPermission, Project, ProjectFileStar, ProjectMembership,
 )
 
 # ── Elasticsearch & Redis clients ──
@@ -158,6 +158,7 @@ async def lifespan(app: FastAPI):
                             },
                             "mime_type": {"type": "keyword"},
                             "user_id": {"type": "keyword"},
+                            "project_id": {"type": "keyword"},
                             "folder_id": {"type": "keyword"},
                             "size": {"type": "long"},
                             "is_deleted": {"type": "boolean"},
@@ -166,6 +167,11 @@ async def lifespan(app: FastAPI):
                         }
                     },
                 },
+            )
+        else:
+            await es_client.indices.put_mapping(
+                index="cloudvault-files",
+                properties={"project_id": {"type": "keyword"}},
             )
     except Exception:
         pass  # ES may not be ready yet; search-indexer will handle it
@@ -215,6 +221,7 @@ def _file_to_dict(f: File) -> dict:
         "size": f.size,
         "folder_id": f.folder_id,
         "user_id": f.user_id,
+        "project_id": f.project_id,
         "minio_bucket": f.minio_bucket,
         "minio_key": f.minio_key,
         "checksum_sha256": f.checksum_sha256,
@@ -464,16 +471,36 @@ async def search_files(
     date_to: Optional[datetime] = Query(None),
     sort_by: str = Query("relevance", pattern="^(relevance|created_at|updated_at|size)$"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    project_id: Optional[str] = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    project = None
+    if project_id:
+        project_result = await db.execute(
+            select(Project).where((Project.id == project_id) | (Project.slug == project_id))
+        )
+        project = project_result.scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if user.role != "admin":
+            membership = await db.scalar(select(ProjectMembership).where(
+                ProjectMembership.project_id == project.id,
+                ProjectMembership.user_id == user.id,
+            ))
+            if not membership:
+                raise HTTPException(status_code=403, detail="Project access denied")
+
     # Try Elasticsearch first
     if es_client:
         try:
-            filters = [
-                {"term": {"user_id": user.id}},
-                {"term": {"is_deleted": False}},
-            ]
+            filters = [{"term": {"is_deleted": False}}]
+            must_not = []
+            if project:
+                filters.append({"term": {"project_id": project.id}})
+            else:
+                filters.append({"term": {"user_id": user.id}})
+                must_not.append({"exists": {"field": "project_id"}})
             if mime_type:
                 filters.append({"prefix": {"mime_type": mime_type}})
             if min_size is not None or max_size is not None:
@@ -505,6 +532,7 @@ async def search_files(
                             }
                         ],
                         "filter": filters,
+                        "must_not": must_not,
                     }
                 },
                 "from": (page - 1) * page_size,
@@ -525,7 +553,19 @@ async def search_files(
                 src["id"] = hit["_id"]
                 if "highlight" in hit:
                     src["highlight"] = hit["highlight"]
+                if project:
+                    src["project_name"] = project.name
+                    src["project_slug"] = project.slug
                 files.append(src)
+
+            if project and files:
+                starred_result = await db.execute(select(ProjectFileStar.file_id).where(
+                    ProjectFileStar.user_id == user.id,
+                    ProjectFileStar.file_id.in_([item["id"] for item in files]),
+                ))
+                starred_ids = set(starred_result.scalars().all())
+                for item in files:
+                    item["is_starred"] = item["id"] in starred_ids
 
             return {"files": files, "total": total, "page": page, "page_size": page_size}
         except Exception:
@@ -533,10 +573,13 @@ async def search_files(
 
     # Fallback: MySQL search
     conditions = [
-        File.user_id == user.id,
         File.is_deleted == False,
         File.original_name.like(f"%{q}%"),
     ]
+    if project:
+        conditions.append(File.project_id == project.id)
+    else:
+        conditions.extend([File.user_id == user.id, File.project_id.is_(None)])
     if mime_type:
         conditions.append(File.mime_type.like(f"{mime_type}%"))
     if min_size is not None:
@@ -553,6 +596,13 @@ async def search_files(
     query = select(File).where(*conditions).order_by(order_clause).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     files = result.scalars().all()
+    starred_ids = set()
+    if project and files:
+        starred_result = await db.execute(select(ProjectFileStar.file_id).where(
+            ProjectFileStar.user_id == user.id,
+            ProjectFileStar.file_id.in_([item.id for item in files]),
+        ))
+        starred_ids = set(starred_result.scalars().all())
 
     count_q = select(func.count()).select_from(
         select(File).where(*conditions).subquery()
@@ -560,7 +610,14 @@ async def search_files(
     total = (await db.execute(count_q)).scalar() or 0
 
     return {
-        "files": [_file_to_dict(f) for f in files],
+        "files": [
+            {
+                **_file_to_dict(f),
+                **({"is_starred": f.id in starred_ids} if project else {}),
+                **({"project_name": project.name, "project_slug": project.slug} if project else {}),
+            }
+            for f in files
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,
