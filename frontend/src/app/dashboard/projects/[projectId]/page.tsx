@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
-  HardDrive, KeyRound, Loader2, RefreshCw, Shield, Trash2, Upload, UserPlus, X,
+  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Shield, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
@@ -13,7 +13,7 @@ import {
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 
-type Tab = 'files' | 'members' | 'access' | 'policy';
+type Tab = 'files' | 'trash' | 'members' | 'access' | 'policy';
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -38,6 +38,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
+  const [trash, setTrash] = useState<ProjectFile[]>([]);
   const [previewFile, setPreviewFile] = useState<ProjectFile | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
@@ -55,13 +56,15 @@ export default function ProjectDetailPage() {
   const loadData = useCallback(async () => {
     try {
       setError('');
-      const [projectData, usageData, fileData, memberData] = await Promise.all([
+      const [projectData, usageData, fileData, trashData, memberData] = await Promise.all([
         projectApi.get(projectId), projectApi.getUsage(projectId),
-        projectApi.listFiles(projectId), projectApi.listMembers(projectId),
+        projectApi.listFiles(projectId), projectApi.listTrash(projectId),
+        projectApi.listMembers(projectId),
       ]);
       setProject(projectData);
       setUsage(usageData);
       setFiles(fileData.files);
+      setTrash(trashData.files);
       setMembers(memberData);
       if (projectData.member_role === 'admin') {
         setAccounts(await projectApi.listServiceAccounts(projectId));
@@ -174,6 +177,29 @@ export default function ProjectDetailPage() {
     try {
       await projectApi.deleteFile(projectId, item.id);
       setFiles((current) => current.filter((file) => file.id !== item.id));
+      setTrash((current) => [{
+        ...item,
+        status: 'DELETED',
+        is_deleted: true,
+        deleted_at: new Date().toISOString(),
+      }, ...current]);
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const restoreFile = async (item: ProjectFile) => {
+    try {
+      const restored = await projectApi.restoreFile(projectId, item.id);
+      setTrash((current) => current.filter((file) => file.id !== item.id));
+      setFiles((current) => [restored, ...current]);
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const permanentlyDeleteFile = async (item: ProjectFile) => {
+    if (!window.confirm(`Permanently delete ${item.original_name}? This cannot be undone.`)) return;
+    try {
+      await projectApi.permanentlyDeleteFile(projectId, item.id);
+      setTrash((current) => current.filter((file) => file.id !== item.id));
+      await loadData();
     } catch (err) { setError(errorMessage(err)); }
   };
 
@@ -245,7 +271,8 @@ export default function ProjectDetailPage() {
 
   const usagePercent = Math.min(100, usage?.percentage || 0);
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'files', label: 'Files' }, { id: 'members', label: 'Members' }, { id: 'policy', label: 'Policy' },
+    { id: 'files', label: 'Files' }, { id: 'trash', label: `Trash${trash.length ? ` (${trash.length})` : ''}` },
+    { id: 'members', label: 'Members' }, { id: 'policy', label: 'Policy' },
     ...(isAdmin ? [{ id: 'access' as Tab, label: 'Service accounts' }] : []),
   ];
 
@@ -312,6 +339,43 @@ export default function ProjectDetailPage() {
           ) : (
             <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
               <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-gray-800 text-xs uppercase text-gray-500"><tr><th className="p-4">File</th><th className="p-4">Artifact</th><th className="p-4">Size</th><th className="p-4">Uploaded</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-gray-800">{files.map((item) => <tr key={item.id} className="hover:bg-gray-800/40"><td className="p-4"><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></td><td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td><td className="p-4 text-gray-400">{formatBytes(item.size)}</td><td className="p-4 text-gray-400">{formatDate(item.created_at)}</td><td className="p-4"><div className="flex justify-end gap-1"><button onClick={() => setPreviewFile(item)} title="Preview" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Eye size={17} /></button><button onClick={() => void downloadFile(item)} title="Download" className="rounded-lg p-2 text-gray-400 hover:bg-cyan-500/10 hover:text-cyan-300"><Download size={17} /></button>{canWrite && <button onClick={() => void deleteFile(item)} title="Move to trash" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></td></tr>)}</tbody></table></div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === 'trash' && (
+        <section className="space-y-5">
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
+            Trashed files still count toward the project quota. Permanent deletion removes the stored object and releases its space.
+          </div>
+          {trash.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400">
+              <Trash2 className="mx-auto mb-3 text-gray-600" size={42} />
+              <p>Project trash is empty.</p>
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-gray-800 text-xs uppercase text-gray-500">
+                    <tr><th className="p-4">File</th><th className="p-4">Size</th><th className="p-4">Deleted</th><th className="p-4 text-right">Actions</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {trash.map((item) => (
+                      <tr key={item.id} className="hover:bg-gray-800/40">
+                        <td className="p-4"><div className="font-medium text-gray-100">{item.original_name}</div><div className="mt-1 text-xs text-gray-600">{String(item.metadata.artifact_type || '—')}</div></td>
+                        <td className="p-4 text-gray-400">{formatBytes(item.size)}</td>
+                        <td className="p-4 text-gray-400">{formatDate(item.deleted_at)}</td>
+                        <td className="p-4"><div className="flex justify-end gap-1">
+                          {canWrite && <button onClick={() => void restoreFile(item)} title="Restore" className="rounded-lg p-2 text-gray-400 hover:bg-emerald-500/10 hover:text-emerald-300"><RotateCcw size={17} /></button>}
+                          {isAdmin && <button onClick={() => void permanentlyDeleteFile(item)} title="Delete permanently" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}
+                        </div></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </section>

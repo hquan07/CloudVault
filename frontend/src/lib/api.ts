@@ -264,6 +264,8 @@ export interface ProjectFile {
   size: number;
   checksum_sha256: string;
   status: string;
+  is_deleted: boolean;
+  deleted_at: string | null;
   metadata: Record<string, unknown>;
   retention_until: string | null;
   created_at: string;
@@ -332,6 +334,11 @@ export const projectApi = {
       `${FILE_BASE}/projects/${projectId}/files`
     ),
 
+  listTrash: (projectId: string) =>
+    request<{ files: ProjectFile[]; limit: number; offset: number }>(
+      `${FILE_BASE}/projects/${projectId}/files/trash`
+    ),
+
   uploadWithProgress: async (
     projectId: string,
     file: File,
@@ -396,6 +403,17 @@ export const projectApi = {
 
   deleteFile: (projectId: string, fileId: string) =>
     request(`${FILE_BASE}/projects/${projectId}/files/${fileId}`, { method: 'DELETE' }),
+
+  restoreFile: (projectId: string, fileId: string) =>
+    request<ProjectFile>(`${FILE_BASE}/projects/${projectId}/files/${fileId}/restore`, {
+      method: 'POST',
+    }),
+
+  permanentlyDeleteFile: (projectId: string, fileId: string) =>
+    request<{ detail: string; released_bytes: number }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/permanent`,
+      { method: 'DELETE' },
+    ),
 
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),

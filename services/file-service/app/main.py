@@ -195,6 +195,8 @@ def _project_file_to_dict(f: File) -> dict:
         "size": f.size,
         "checksum_sha256": f.checksum_sha256,
         "status": f.status,
+        "is_deleted": f.is_deleted,
+        "deleted_at": f.deleted_at.isoformat() if f.deleted_at else None,
         "metadata": f.metadata_json or {},
         "retention_until": f.retention_until.isoformat() if f.retention_until else None,
         "created_at": f.created_at.isoformat() if f.created_at else None,
@@ -656,6 +658,35 @@ async def upload_project_file(
     return _project_file_to_dict(db_file)
 
 
+@app.get("/api/v1/projects/{project_id}/files/trash")
+async def list_project_trash(
+    project_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    result = await db.execute(
+        select(File)
+        .where(
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+        .order_by(File.deleted_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    files = result.scalars().all()
+    await db.commit()
+    return {"files": [_project_file_to_dict(item) for item in files], "limit": limit, "offset": offset}
+
+
 @app.get("/api/v1/projects/{project_id}/files/{file_id}")
 async def get_project_file(
     project_id: str,
@@ -762,6 +793,111 @@ async def delete_project_file(
         "filename": stored.original_name,
     })
     return {"detail": "Project file moved to trash"}
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/restore")
+async def restore_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(409, "PROJECT_NOT_ACTIVE", "Restore the project before restoring files")
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found in trash")
+
+    stored.is_deleted = False
+    stored.status = "AVAILABLE"
+    stored.deleted_at = None
+    await db.commit()
+    await db.refresh(stored)
+    await _emit_event("FILE_RESTORED", {
+        "file_id": stored.id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+    })
+    return _project_file_to_dict(stored)
+
+
+@app.delete("/api/v1/projects/{project_id}/files/{file_id}/permanent")
+async def permanently_delete_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"admin"},
+    )
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found in trash")
+
+    versions_result = await db.execute(
+        select(FileVersion).where(FileVersion.file_id == stored.id)
+    )
+    versions = versions_result.scalars().all()
+    stored_objects = {version.minio_key: version.size for version in versions}
+    stored_objects.setdefault(stored.minio_key, stored.size)
+
+    try:
+        for object_key in stored_objects:
+            await asyncio.to_thread(minio_client.remove_object, stored.minio_bucket, object_key)
+        if stored.thumbnail_key:
+            await asyncio.to_thread(
+                minio_client.remove_object,
+                settings.MINIO_BUCKET_THUMBNAILS,
+                stored.thumbnail_key,
+            )
+    except Exception:
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Object storage deletion failed; retry safely")
+
+    project_result = await db.execute(
+        select(Project).where(Project.id == principal.project.id).with_for_update()
+    )
+    locked_project = project_result.scalar_one()
+    released_bytes = sum(stored_objects.values())
+    original_name = stored.original_name
+    locked_project.storage_used = max(0, locked_project.storage_used - released_bytes)
+    await db.delete(stored)
+    await db.commit()
+
+    await _emit_event("FILE_PERMANENTLY_DELETED", {
+        "file_id": file_id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": original_name,
+        "released_bytes": released_bytes,
+    })
+    return {"detail": "Project file permanently deleted", "released_bytes": released_bytes}
 
 
 # ══════════════════════════════════════════════
