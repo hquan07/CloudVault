@@ -26,7 +26,8 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import (
-    User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ProjectPin, ServiceAccount,
+    AuditLog, User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ProjectPin,
+    ServiceAccount,
 )
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
@@ -489,6 +490,23 @@ async def _project_is_pinned(db: AsyncSession, user_id: str, project_id: str) ->
     return await db.get(ProjectPin, (user_id, project_id)) is not None
 
 
+def _add_project_audit(
+    db: AsyncSession,
+    action: str,
+    project: Project,
+    user: User,
+    details: dict | None = None,
+) -> None:
+    db.add(AuditLog(
+        user_id=user.id,
+        project_id=project.id,
+        action=action,
+        resource_type="project",
+        resource_id=project.id,
+        details_json={"project_name": project.name, "project_slug": project.slug, **(details or {})},
+    ))
+
+
 @app.get("/api/v1/projects", response_model=List[ProjectResponse])
 async def list_projects(
     user: User = Depends(get_current_user),
@@ -544,6 +562,7 @@ async def create_project(
     try:
         await db.flush()
         db.add(ProjectMembership(project_id=project.id, user_id=admin.id, role="admin"))
+        _add_project_audit(db, "PROJECT_CREATED", project, admin)
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -576,6 +595,7 @@ async def pin_project(
     existing = await db.get(ProjectPin, (user.id, project.id))
     if not existing:
         db.add(ProjectPin(user_id=user.id, project_id=project.id))
+        _add_project_audit(db, "PROJECT_PINNED", project, user)
         await db.commit()
     return _project_response(
         project,
@@ -594,6 +614,7 @@ async def unpin_project(
     existing = await db.get(ProjectPin, (user.id, project.id))
     if existing:
         await db.delete(existing)
+        _add_project_audit(db, "PROJECT_UNPINNED", project, user)
         await db.commit()
     return _project_response(
         project,
@@ -641,6 +662,8 @@ async def update_project(
         raise HTTPException(status_code=409, detail="Quota cannot be lower than storage used")
     for key, value in updates.items():
         setattr(project, key, value)
+    if updates:
+        _add_project_audit(db, "PROJECT_UPDATED", project, user, {"changed_fields": sorted(updates)})
     await db.commit()
     await db.refresh(project)
     return _project_response(
@@ -665,6 +688,7 @@ async def archive_project(
             .where(ServiceAccount.project_id == project.id, ServiceAccount.is_active.is_(True))
             .values(is_active=False, token_hash=None, revoked_at=revoked_at)
         )
+        _add_project_audit(db, "PROJECT_ARCHIVED", project, user)
         await db.commit()
         await db.refresh(project)
     return _project_response(
@@ -684,6 +708,7 @@ async def restore_project(
     if project.status != "archived":
         raise HTTPException(status_code=409, detail="Only archived projects can be restored")
     project.status = "active"
+    _add_project_audit(db, "PROJECT_RESTORED", project, user)
     await db.commit()
     await db.refresh(project)
     return _project_response(
@@ -715,6 +740,8 @@ async def delete_project(
             detail="Project still contains files. Empty project trash before permanent deletion",
         )
 
+    _add_project_audit(db, "PROJECT_DELETED", project, user)
+    await db.flush()
     await db.execute(delete(Project).where(Project.id == project.id))
     await db.commit()
     return Response(status_code=204)

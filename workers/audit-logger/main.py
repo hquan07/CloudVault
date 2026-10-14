@@ -36,6 +36,11 @@ EVENT_TO_ACTION = {
     "FILE_RESTORED": "FILE_RESTORED",
     "FILE_MOVED": "FILE_MOVED",
     "FILE_COPIED": "FILE_COPIED",
+    "FILE_STARRED": "FILE_STARRED",
+    "FILE_UNSTARRED": "FILE_UNSTARRED",
+    "FILE_PERMANENTLY_DELETED": "FILE_PERMANENTLY_DELETED",
+    "FOLDER_CREATED": "FOLDER_CREATED",
+    "FOLDER_DELETED": "FOLDER_DELETED",
     "QUOTA_EXCEEDED": "QUOTA_EXCEEDED",
     "USER_REGISTERED": "USER_REGISTERED",
     "USER_LOGGED_IN": "USER_LOGGED_IN",
@@ -49,6 +54,11 @@ EVENT_TO_RESOURCE = {
     "FILE_RESTORED": "file",
     "FILE_MOVED": "file",
     "FILE_COPIED": "file",
+    "FILE_STARRED": "file",
+    "FILE_UNSTARRED": "file",
+    "FILE_PERMANENTLY_DELETED": "file",
+    "FOLDER_CREATED": "folder",
+    "FOLDER_DELETED": "folder",
     "QUOTA_EXCEEDED": "project",
     "USER_REGISTERED": "user",
     "USER_LOGGED_IN": "user",
@@ -79,7 +89,12 @@ async def main():
                 continue
 
             resource_type = EVENT_TO_RESOURCE.get(event, "file")
-            resource_id = data.get("file_id") or data.get("user_id")
+            resource_id = (
+                data.get("file_id")
+                or data.get("folder_id")
+                or data.get("project_id")
+                or data.get("user_id")
+            )
             user_id = data.get("user_id")
 
             async with session_factory() as session:

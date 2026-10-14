@@ -297,6 +297,18 @@ export interface ProjectFolder {
   updated_at: string;
 }
 
+export interface AuditActivity {
+  id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  user_id: string | null;
+  project_id: string | null;
+  service_account_id: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export interface ProjectMember {
   id: string;
   project_id: string;
@@ -597,8 +609,13 @@ export const metaApi = {
   suggest: (q: string) =>
     request(`${META_BASE}/search/suggest?q=${encodeURIComponent(q)}`),
 
-  getActivity: (page = 1, pageSize = 20) =>
-    request(`${META_BASE}/activity?page=${page}&page_size=${pageSize}`),
+  getActivity: (page = 1, pageSize = 20, projectId?: string) => {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (projectId) query.set('project_id', projectId);
+    return request<{ activities: AuditActivity[]; total: number; page: number; page_size: number }>(
+      `${META_BASE}/activity?${query.toString()}`,
+    );
+  },
 };
 
 /* ── Admin API ── */

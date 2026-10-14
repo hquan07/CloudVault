@@ -556,6 +556,14 @@ async def create_project_folder(
     db.add(folder)
     await db.commit()
     await db.refresh(folder)
+    await _emit_event("FOLDER_CREATED", {
+        "folder_id": folder.id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder.name,
+        "path": folder.path,
+    })
     return _project_folder_to_dict(folder)
 
 
@@ -585,8 +593,16 @@ async def delete_project_folder(
     )
     if child_count or file_count:
         raise _api_error(409, "FOLDER_NOT_EMPTY", "Move or delete folder contents first")
+    folder_name = folder.name
     await db.delete(folder)
     await db.commit()
+    await _emit_event("FOLDER_DELETED", {
+        "folder_id": folder_id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder_name,
+    })
     return {"detail": "Project folder deleted"}
 
 
@@ -956,6 +972,12 @@ async def star_project_file(
     if not existing:
         db.add(ProjectFileStar(user_id=principal.user.id, file_id=stored.id))
         await db.commit()
+        await _emit_event("FILE_STARRED", {
+            "file_id": stored.id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+            "filename": stored.original_name,
+        })
     return {"file_id": stored.id, "is_starred": True}
 
 
@@ -985,6 +1007,11 @@ async def unstar_project_file(
     if existing:
         await db.delete(existing)
         await db.commit()
+        await _emit_event("FILE_UNSTARRED", {
+            "file_id": file_id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+        })
     return {"file_id": file_id, "is_starred": False}
 
 
@@ -1024,14 +1051,23 @@ async def bulk_star_project_files(
     existing_stars = stars_result.scalars().all()
     if req.starred:
         existing_ids = {item.file_id for item in existing_stars}
+        changed_ids = [file_id for file_id in file_ids if file_id not in existing_ids]
         db.add_all([
             ProjectFileStar(user_id=principal.user.id, file_id=file_id)
-            for file_id in file_ids if file_id not in existing_ids
+            for file_id in changed_ids
         ])
     else:
+        changed_ids = [item.file_id for item in existing_stars]
         for item in existing_stars:
             await db.delete(item)
     await db.commit()
+    event_type = "FILE_STARRED" if req.starred else "FILE_UNSTARRED"
+    for file_id in changed_ids:
+        await _emit_event(event_type, {
+            "file_id": file_id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+        })
     return {"file_ids": file_ids, "is_starred": req.starred}
 
 
@@ -1109,6 +1145,14 @@ async def move_project_file(
     stored.folder_id = destination.id if destination else None
     await db.commit()
     await db.refresh(stored)
+    await _emit_event("FILE_MOVED", {
+        "file_id": stored.id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+        "folder_id": stored.folder_id,
+    })
     starred_ids = await _project_starred_ids(
         db,
         principal.user.id if principal.user else None,

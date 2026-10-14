@@ -4,18 +4,18 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
+  Activity, AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
   Folder, FolderPlus, HardDrive, Home, KeyRound, Loader2, RefreshCw, RotateCcw,
   Save, Search, Shield, Star, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
-  ApiError, Project, ProjectFile, ProjectFileFilters, ProjectFolder, ProjectMember,
-  ProjectUsage, ServiceAccount, projectApi,
+  ApiError, AuditActivity, Project, ProjectFile, ProjectFileFilters, ProjectFolder,
+  ProjectMember, ProjectUsage, ServiceAccount, metaApi, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 
-type Tab = 'files' | 'trash' | 'members' | 'access' | 'policy';
+type Tab = 'files' | 'trash' | 'members' | 'access' | 'policy' | 'activity';
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -34,6 +34,13 @@ function formatDate(value: string | null): string {
   return value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
 }
 
+function activityResourceName(activity: AuditActivity): string {
+  const details = activity.details || {};
+  return String(
+    details.filename || details.folder_name || details.project_name || activity.resource_id || '',
+  );
+}
+
 export default function ProjectDetailPage() {
   const params = useParams<{ projectId: string }>();
   const router = useRouter();
@@ -48,6 +55,7 @@ export default function ProjectDetailPage() {
   const [previewFile, setPreviewFile] = useState<ProjectFile | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
+  const [activities, setActivities] = useState<AuditActivity[]>([]);
   const [tab, setTab] = useState<Tab>('files');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -70,11 +78,12 @@ export default function ProjectDetailPage() {
   const loadData = useCallback(async () => {
     try {
       setError('');
-      const [projectData, usageData, fileData, folderData, trashData, memberData] = await Promise.all([
+      const [projectData, usageData, fileData, folderData, trashData, memberData, activityData] = await Promise.all([
         projectApi.get(projectId), projectApi.getUsage(projectId),
         projectApi.listFiles(projectId, { ...fileFilters, folder_id: currentFolderId || 'root' }),
         projectApi.listFolders(projectId, currentFolderId), projectApi.listTrash(projectId),
         projectApi.listMembers(projectId),
+        metaApi.getActivity(1, 100, projectId).catch(() => ({ activities: [], total: 0, page: 1, page_size: 100 })),
       ]);
       setProject(projectData);
       setUsage(usageData);
@@ -83,6 +92,7 @@ export default function ProjectDetailPage() {
       setSelectedFileIds(new Set());
       setTrash(trashData.files);
       setMembers(memberData);
+      setActivities(activityData.activities);
       if (projectData.member_role === 'admin') {
         setAccounts(await projectApi.listServiceAccounts(projectId));
       }
@@ -323,6 +333,13 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const refreshActivity = async () => {
+    try {
+      const data = await metaApi.getActivity(1, 100, projectId);
+      setActivities(data.activities);
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -422,7 +439,8 @@ export default function ProjectDetailPage() {
   const usagePercent = Math.min(100, usage?.percentage || 0);
   const tabs: { id: Tab; label: string }[] = [
     { id: 'files', label: 'Files' }, { id: 'trash', label: `Trash${trash.length ? ` (${trash.length})` : ''}` },
-    { id: 'members', label: 'Members' }, { id: 'policy', label: 'Settings' },
+    { id: 'members', label: 'Members' }, { id: 'activity', label: 'Activity' },
+    { id: 'policy', label: 'Settings' },
     ...(isAdmin ? [{ id: 'access' as Tab, label: 'Service accounts' }] : []),
   ];
 
@@ -589,6 +607,21 @@ export default function ProjectDetailPage() {
         <section className="space-y-5">
           {isAdmin && <form onSubmit={addMember} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-5 md:grid-cols-[1fr_180px_auto] md:items-end"><label className="text-sm text-gray-300">User ID<input required name="user_id" placeholder="UUID of an active user" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><label className="text-sm text-gray-300">Role<select name="role" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><UserPlus size={17} /> Add member</button></form>}
           <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{members.map((member) => <div key={member.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-800 font-semibold text-gray-300">{member.username.charAt(0).toUpperCase()}</div><div><div className="font-medium text-white">{member.username}</div><div className="text-sm text-gray-500">{member.email}</div></div></div><div className="flex items-center gap-2">{isAdmin ? <select value={member.role} onChange={(event) => void changeMemberRole(member, event.target.value as ProjectMember['role'])} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm capitalize text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select> : <span className="rounded-full border border-gray-700 px-3 py-1 text-xs capitalize text-gray-300">{member.role}</span>}{isAdmin && <button onClick={() => void removeMember(member)} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></div>)}</div></div>
+        </section>
+      )}
+
+      {tab === 'activity' && (
+        <section className="space-y-4">
+          <div className="flex items-center justify-between"><div><h2 className="font-semibold text-white">Project activity</h2><p className="mt-1 text-sm text-gray-500">Lifecycle, storage and organization events across users and service accounts.</p></div><button onClick={() => void refreshActivity()} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Refresh</button></div>
+          {activities.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400"><Activity className="mx-auto mb-3 text-gray-600" size={42} /><p>No project activity has been recorded yet.</p></div>
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
+              <div className="divide-y divide-gray-800">
+                {activities.map((activity) => <div key={activity.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-center gap-3"><span className="rounded-lg bg-gray-800 p-2 text-cyan-400"><Activity size={17} /></span><div className="min-w-0"><div className="text-sm font-medium text-gray-200">{activity.action.replaceAll('_', ' ')}</div><div className="truncate text-xs text-gray-500">{activity.resource_type}{activityResourceName(activity) ? ` · ${activityResourceName(activity)}` : ''}{activity.service_account_id ? ' · service account' : activity.user_id ? ' · user' : ''}</div></div></div><time className="shrink-0 text-xs text-gray-500">{formatDate(activity.created_at)}</time></div>)}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
