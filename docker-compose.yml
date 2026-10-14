@@ -21,6 +21,23 @@ services:
     networks:
       - cloudvault-network
 
+  mysql-migrate:
+    image: mysql:8.0
+    container_name: cloudvault-mysql-migrate
+    restart: "no"
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    volumes:
+      - ./infrastructure/mysql/migrations:/migrations:ro
+      - ./infrastructure/mysql/run-migrations.sh:/run-migrations.sh:ro
+    entrypoint: ["/bin/sh", "/run-migrations.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - cloudvault-network
+
   # CACHE — Redis 7
   redis:
     image: redis:7-alpine
@@ -256,7 +273,23 @@ services:
       - "${INFRA_BIND_ADDRESS:-127.0.0.1}:9090:9090"
     volumes:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
+    networks:
+      - cloudvault-network
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: cloudvault-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "${INFRA_BIND_ADDRESS:-127.0.0.1}:9093:9093"
+    volumes:
+      - ./infrastructure/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
     networks:
       - cloudvault-network
 
@@ -294,7 +327,10 @@ services:
       - redis
       - frontend
     networks:
-      - cloudvault-network
+      cloudvault-network:
+      cloudvault-shared:
+        aliases:
+          - cloudvault-api
 
   # FRONTEND SERVICE
   frontend:
@@ -320,8 +356,8 @@ services:
     volumes:
       - ./services/auth-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -341,8 +377,8 @@ services:
     volumes:
       - ./services/file-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_healthy
       redis:
@@ -364,8 +400,8 @@ services:
     volumes:
       - ./services/metadata-service:/app
     depends_on:
-      mysql:
-        condition: service_healthy
+      mysql-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       elasticsearch-init:
@@ -423,6 +459,27 @@ services:
     networks:
       - cloudvault-network
 
+  project-operations:
+    build: ./workers/project-operations
+    container_name: cloudvault-project-operations
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/project-operations:/app
+    depends_on:
+      mysql-migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9100/metrics', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - cloudvault-network
+
   zip-extractor-worker:
     build: ./workers/zip-extractor-worker
     container_name: cloudvault-zip-extractor
@@ -456,6 +513,8 @@ volumes:
     driver: local
   prometheus-data:
     driver: local
+  alertmanager-data:
+    driver: local
   grafana-data:
     driver: local
 
@@ -464,3 +523,6 @@ networks:
   cloudvault-network:
     driver: bridge
     name: cloudvault-network
+  cloudvault-shared:
+    external: true
+    name: cloudvault-shared

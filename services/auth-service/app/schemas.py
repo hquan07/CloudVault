@@ -4,7 +4,7 @@ Request/response models matching the frontend API client expectations.
 """
 
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime
 
 
@@ -72,3 +72,96 @@ class MeResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class ProjectCreateRequest(BaseModel):
+    slug: str = Field(..., min_length=2, max_length=63, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    name: str = Field(..., min_length=2, max_length=120)
+    description: Optional[str] = Field(None, max_length=1000)
+    storage_quota: int = Field(..., ge=0)
+    max_file_size: int = Field(..., gt=0)
+    warning_percent: int = Field(80, ge=1, le=100)
+    retention_policy: Optional[dict[str, Any]] = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=120)
+    description: Optional[str] = Field(None, max_length=1000)
+    status: Optional[str] = None
+    storage_quota: Optional[int] = Field(None, ge=0)
+    max_file_size: Optional[int] = Field(None, gt=0)
+    warning_percent: Optional[int] = Field(None, ge=1, le=100)
+    retention_policy: Optional[dict[str, Any]] = None
+
+
+class ProjectDeleteRequest(BaseModel):
+    confirm_slug: str
+
+
+class ProjectMembershipRequest(BaseModel):
+    user_id: str
+    role: str = "viewer"
+
+
+class ProjectMembershipRoleRequest(BaseModel):
+    role: str
+
+
+class ProjectMembershipResponse(BaseModel):
+    id: str
+    project_id: str
+    user_id: str
+    role: str
+    username: str
+    email: str
+    created_at: datetime
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    slug: str
+    name: str
+    description: Optional[str] = None
+    status: str
+    storage_quota: int
+    storage_used: int
+    max_file_size: int
+    warning_percent: int
+    retention_policy: Optional[dict[str, Any]] = None
+    member_role: Optional[str] = None
+    is_pinned: bool = False
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectUsageResponse(BaseModel):
+    project_id: str
+    storage_used: int
+    storage_quota: int
+    available_bytes: int
+    percentage: float
+    warning_percent: int
+
+
+class ServiceAccountCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    scopes: list[str] = Field(default_factory=lambda: ["files:create"])
+    expires_at: Optional[datetime] = None
+
+
+class ServiceAccountResponse(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    token_prefix: Optional[str] = None
+    scopes: list[str]
+    is_active: bool
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ServiceAccountIssuedResponse(ServiceAccountResponse):
+    token: str

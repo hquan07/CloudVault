@@ -63,6 +63,13 @@ def create_refresh_token() -> tuple[str, str, datetime]:
     return raw, token_hash, expires_at
 
 
+def create_service_token() -> tuple[str, str, str]:
+    """Return a one-time raw token, display prefix, and SHA-256 hash."""
+    prefix = f"cvp_{uuid.uuid4().hex[:12]}"
+    raw = f"{prefix}.{secrets.token_urlsafe(36)}"
+    return raw, prefix, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def decode_access_token(token: str) -> dict:
     """Decode and validate an access token. Raises jwt exceptions on failure."""
     return jwt.decode(

@@ -14,36 +14,72 @@ Endpoints matching the frontend api.ts contract:
   GET    /api/v1/folders                  — list folders
 """
 
+import asyncio
 import hashlib
 import json
+import os
+import re
+import time
 import uuid
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import jwt as pyjwt
 import redis.asyncio as aioredis
 from aiokafka import AIOKafkaProducer
-from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from minio import Minio
+from pydantic import BaseModel, Field
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import get_db
-from app.models import User, File, Folder, FileVersion
+from app.database import get_db, async_session
+from app.models import (
+    User, File, Folder, FileVersion, Project, ProjectMembership,
+    ProjectFileStar, ServiceAccount, ProjectUpload, ProjectOperationStatus,
+)
 
 # ── Global clients ──
 minio_client: Minio | None = None
 minio_public_client: Minio | None = None
 kafka_producer: AIOKafkaProducer | None = None
 redis_client: aioredis.Redis | None = None
+reconciliation_task: asyncio.Task | None = None
+
+PROJECT_API_REQUESTS = Counter(
+    "cloudvault_project_api_requests_total",
+    "Project-scoped API requests grouped by project, method, and status.",
+    ("project", "method", "status"),
+)
+PROJECT_API_LATENCY = Histogram(
+    "cloudvault_project_api_request_duration_seconds",
+    "Project-scoped API latency grouped by project and method.",
+    ("project", "method"),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
+)
+PROJECT_UPLOAD_BYTES = Counter(
+    "cloudvault_project_uploaded_bytes_total",
+    "Bytes successfully uploaded through a project-scoped API.",
+    ("project",),
+)
+PROJECT_QUOTA_REJECTIONS = Counter(
+    "cloudvault_project_quota_rejections_total",
+    "Project uploads rejected because the hard quota was reached.",
+    ("project",),
+)
+_PROJECT_PATH = re.compile(r"^/api/v1/projects/([^/]+)(?:/|$)")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global minio_client, minio_public_client, kafka_producer, redis_client
+    global minio_client, minio_public_client, kafka_producer, redis_client, reconciliation_task
 
     # MinIO
     minio_client = Minio(
@@ -74,12 +110,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         kafka_producer = None
 
+    reconciliation_task = asyncio.create_task(_project_upload_reconciliation_loop())
+
     yield
 
     if kafka_producer:
         await kafka_producer.stop()
     if redis_client:
         await redis_client.aclose()
+    if reconciliation_task:
+        reconciliation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reconciliation_task
 
 
 # ── FastAPI App ──
@@ -99,6 +141,36 @@ app.add_middleware(
 )
 
 Instrumentator().instrument(app).expose(app)
+
+
+@app.middleware("http")
+async def observe_project_requests(request: Request, call_next):
+    """Expose bounded, project-scoped request volume/error/latency metrics."""
+    match = _PROJECT_PATH.match(request.url.path)
+    if not match:
+        return await call_next(request)
+
+    raw_project = match.group(1)
+    project_label = raw_project if re.fullmatch(r"[A-Za-z0-9-]{1,63}", raw_project) else "invalid"
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        # Do not let unauthenticated/not-found probes create unbounded labels.
+        if status_code not in range(200, 400) and status_code not in {403, 409, 413}:
+            project_label = "rejected"
+        PROJECT_API_REQUESTS.labels(
+            project=project_label,
+            method=request.method,
+            status=str(status_code),
+        ).inc()
+        PROJECT_API_LATENCY.labels(
+            project=project_label,
+            method=request.method,
+        ).observe(time.perf_counter() - started)
 
 from app.telemetry import setup_opentelemetry
 setup_opentelemetry(app, "file-service")
@@ -168,6 +240,272 @@ def _file_to_dict(f: File) -> dict:
     }
 
 
+def _project_file_to_dict(f: File, *, is_starred: bool = False) -> dict:
+    return {
+        "id": f.id,
+        # Stable integration contract for machine clients. Keep ``id`` for
+        # backwards compatibility with the existing web application.
+        "file_id": f.id,
+        "project_id": f.project_id,
+        "folder_id": f.folder_id,
+        "original_name": f.original_name,
+        "mime_type": f.mime_type,
+        "size": f.size,
+        "checksum_sha256": f.checksum_sha256,
+        "status": f.status,
+        "is_deleted": f.is_deleted,
+        "deleted_at": f.deleted_at.isoformat() if f.deleted_at else None,
+        "is_starred": is_starred,
+        "metadata": f.metadata_json or {},
+        "retention_until": f.retention_until.isoformat() if f.retention_until else None,
+        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+    }
+
+
+def _api_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+async def _project_starred_ids(
+    db: AsyncSession,
+    user_id: str | None,
+    file_ids: list[str],
+) -> set[str]:
+    if not user_id or not file_ids:
+        return set()
+    result = await db.execute(
+        select(ProjectFileStar.file_id).where(
+            ProjectFileStar.user_id == user_id,
+            ProjectFileStar.file_id.in_(file_ids),
+        )
+    )
+    return set(result.scalars().all())
+
+
+@dataclass
+class ProjectPrincipal:
+    project: Project
+    user: User | None = None
+    service_account: ServiceAccount | None = None
+    member_role: str | None = None
+
+
+class ProjectBulkFilesRequest(BaseModel):
+    file_ids: list[str] = Field(..., min_length=1, max_length=500)
+
+
+class ProjectBulkStarRequest(ProjectBulkFilesRequest):
+    starred: bool
+
+
+class ProjectFolderCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    parent_id: str | None = None
+
+
+class ProjectFileMoveRequest(BaseModel):
+    folder_id: str | None = None
+
+
+async def _resolve_project_principal(
+    project_id: str,
+    authorization: str | None,
+    db: AsyncSession,
+    *,
+    service_scope: str,
+    user_roles: set[str],
+) -> ProjectPrincipal:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise _api_error(401, "INVALID_CREDENTIAL", "Missing or invalid credential")
+
+    token = authorization.split(" ", 1)[1]
+    project_result = await db.execute(
+        select(Project).where((Project.id == project_id) | (Project.slug == project_id))
+    )
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise _api_error(404, "PROJECT_NOT_FOUND", "Project not found")
+
+    if token.startswith("cvp_"):
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        account_result = await db.execute(
+            select(ServiceAccount).where(ServiceAccount.token_hash == token_hash)
+        )
+        account = account_result.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        expires_at = account.expires_at if account else None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if (
+            not account
+            or not account.is_active
+            or account.revoked_at is not None
+            or account.project_id != project.id
+            or (expires_at is not None and expires_at <= now)
+        ):
+            raise _api_error(401, "INVALID_CREDENTIAL", "Service credential is invalid or expired")
+        if service_scope not in (account.scopes or []):
+            raise _api_error(403, "PROJECT_ACCESS_DENIED", "Service account scope is insufficient")
+        account.last_used_at = now
+        await db.flush()
+        return ProjectPrincipal(project=project, service_account=account)
+
+    try:
+        payload = pyjwt.decode(
+            token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+        )
+    except Exception:
+        raise _api_error(401, "INVALID_CREDENTIAL", "User credential is invalid or expired")
+    if payload.get("type") != "access":
+        raise _api_error(401, "INVALID_CREDENTIAL", "Invalid token type")
+    jti = payload.get("jti")
+    if jti and redis_client and await redis_client.get(f"blacklist:{jti}"):
+        raise _api_error(401, "INVALID_CREDENTIAL", "Token has been revoked")
+
+    user_result = await db.execute(select(User).where(User.id == payload.get("sub")))
+    user = user_result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise _api_error(401, "INVALID_CREDENTIAL", "User not found or inactive")
+    if user.role == "admin":
+        return ProjectPrincipal(project=project, user=user, member_role="admin")
+
+    membership_result = await db.execute(
+        select(ProjectMembership).where(
+            ProjectMembership.project_id == project.id,
+            ProjectMembership.user_id == user.id,
+        )
+    )
+    membership = membership_result.scalar_one_or_none()
+    if not membership or membership.role not in user_roles:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project role is insufficient")
+    return ProjectPrincipal(project=project, user=user, member_role=membership.role)
+
+
+def _project_folder_to_dict(folder: Folder) -> dict:
+    return {
+        "id": folder.id,
+        "project_id": folder.project_id,
+        "name": folder.name,
+        "parent_id": folder.parent_id,
+        "path": folder.path,
+        "depth": folder.depth,
+        "created_at": folder.created_at.isoformat() if folder.created_at else None,
+        "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
+    }
+
+
+async def _get_project_folder(
+    db: AsyncSession,
+    project_id: str,
+    folder_id: str,
+) -> Folder:
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.project_id == project_id,
+            Folder.is_deleted == False,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise _api_error(404, "FOLDER_NOT_FOUND", "Project folder not found")
+    return folder
+
+
+def _project_retention_until(project: Project, metadata: dict) -> datetime | None:
+    policy = project.retention_policy or {}
+    retention_class = metadata.get("retention_class")
+    days = policy.get(f"{retention_class}_days") or policy.get("default_days")
+    if isinstance(days, int) and days > 0:
+        return datetime.now(timezone.utc) + timedelta(days=days)
+    return None
+
+
+async def _release_project_reservation(
+    db: AsyncSession,
+    project_id: str,
+    upload_id: str,
+    error_code: str,
+) -> None:
+    await db.rollback()
+    project_result = await db.execute(
+        select(Project).where(Project.id == project_id).with_for_update()
+    )
+    project = project_result.scalar_one()
+    upload_result = await db.execute(
+        select(ProjectUpload).where(ProjectUpload.id == upload_id).with_for_update()
+    )
+    upload = upload_result.scalar_one_or_none()
+    if upload and upload.status == "PENDING":
+        project.storage_used = max(0, project.storage_used - upload.reserved_bytes)
+        upload.reserved_bytes = 0
+        upload.status = "FAILED"
+        upload.error_code = error_code
+        await db.commit()
+
+
+async def _reconcile_stale_project_uploads() -> None:
+    stale_before = datetime.now(timezone.utc) - timedelta(minutes=30)
+    async with async_session() as db:
+        result = await db.execute(
+            select(ProjectUpload).where(
+                ProjectUpload.status.in_(["PENDING", "FAILED"]),
+                ProjectUpload.updated_at < stale_before,
+            ).limit(100)
+        )
+        upload_ids = [item.id for item in result.scalars().all()]
+        await db.rollback()
+
+        for upload_id in upload_ids:
+            upload_result = await db.execute(
+                select(ProjectUpload).where(ProjectUpload.id == upload_id).with_for_update()
+            )
+            upload = upload_result.scalar_one_or_none()
+            if not upload or upload.status not in {"PENDING", "FAILED"}:
+                await db.rollback()
+                continue
+            if upload.status == "PENDING" and upload.reserved_bytes:
+                project_result = await db.execute(
+                    select(Project).where(Project.id == upload.project_id).with_for_update()
+                )
+                project = project_result.scalar_one()
+                project.storage_used = max(0, project.storage_used - upload.reserved_bytes)
+                upload.reserved_bytes = 0
+            object_key = upload.object_key
+            upload.object_key = None
+            upload.status = "FAILED"
+            upload.error_code = upload.error_code or "STALE_UPLOAD"
+            await db.commit()
+            if object_key:
+                try:
+                    await asyncio.to_thread(
+                        minio_client.remove_object, settings.MINIO_BUCKET_FILES, object_key
+                    )
+                except Exception:
+                    pass
+
+
+async def _project_upload_reconciliation_loop() -> None:
+    while True:
+        try:
+            await _reconcile_stale_project_uploads()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(300)
+
+
+def _stream_minio_object(response):
+    try:
+        while chunk := response.read(1024 * 1024):
+            yield chunk
+    finally:
+        response.close()
+        response.release_conn()
+
+
 # ── Health Check ──
 
 @app.get("/health")
@@ -176,11 +514,1008 @@ async def health():
 
 
 # ══════════════════════════════════════════════
+# PROJECT FILES
+# ══════════════════════════════════════════════
+
+@app.get("/api/v1/projects/{project_id}/usage")
+async def get_project_usage(
+    project_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="project:usage:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    project = principal.project
+    available = max(0, project.storage_quota - project.storage_used)
+    percentage = round((project.storage_used / project.storage_quota * 100), 2) if project.storage_quota else 0
+    await db.commit()
+    return {
+        "project_id": project.id,
+        "storage_used": project.storage_used,
+        "storage_quota": project.storage_quota,
+        "available_bytes": available,
+        "percentage": percentage,
+        "warning_percent": project.warning_percent,
+    }
+
+
+@app.get("/api/v1/projects/{project_id}/operations")
+async def get_project_operation_status(
+    project_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="project:usage:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    status = await db.get(ProjectOperationStatus, principal.project.id)
+    await db.commit()
+    if not status:
+        return {
+            "project_id": principal.project.id,
+            "health_status": "unknown",
+            "checked_at": None,
+            "details": {"message": "Reconciliation has not completed yet"},
+        }
+    return {
+        "project_id": status.project_id,
+        "health_status": status.health_status,
+        "metadata_bytes": status.metadata_bytes,
+        "object_bytes": status.object_bytes,
+        "usage_drift_bytes": status.usage_drift_bytes,
+        "missing_objects": status.missing_objects,
+        "orphan_objects": status.orphan_objects,
+        "stale_uploads": status.stale_uploads,
+        "expired_files": status.expired_files,
+        "details": status.details_json or {},
+        "checked_at": status.checked_at.isoformat() if status.checked_at else None,
+    }
+
+
+@app.get("/api/v1/projects/{project_id}/folders")
+async def list_project_folders(
+    project_id: str,
+    parent_id: str | None = Query(None),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if parent_id:
+        await _get_project_folder(db, principal.project.id, parent_id)
+    query = select(Folder).where(
+        Folder.project_id == principal.project.id,
+        Folder.is_deleted == False,
+    )
+    query = query.where(Folder.parent_id == parent_id) if parent_id else query.where(Folder.parent_id.is_(None))
+    result = await db.execute(query.order_by(Folder.name.asc()))
+    folders = result.scalars().all()
+    await db.commit()
+    return {"folders": [_project_folder_to_dict(folder) for folder in folders]}
+
+
+@app.post("/api/v1/projects/{project_id}/folders", status_code=201)
+async def create_project_folder(
+    project_id: str,
+    req: ProjectFolderCreateRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    name = req.name.strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise _api_error(400, "INVALID_FOLDER", "Folder name is invalid")
+    parent = await _get_project_folder(db, principal.project.id, req.parent_id) if req.parent_id else None
+    depth = parent.depth + 1 if parent else 0
+    if depth > 32:
+        raise _api_error(400, "INVALID_FOLDER", "Maximum project folder depth is 32")
+    path = f"{parent.path.rstrip('/') if parent else ''}/{name}"
+    if len(path) > 2000:
+        raise _api_error(400, "INVALID_FOLDER", "Folder path is too long")
+    duplicate_query = select(Folder.id).where(
+        Folder.project_id == principal.project.id,
+        Folder.name == name,
+        Folder.is_deleted == False,
+    )
+    duplicate_query = duplicate_query.where(Folder.parent_id == parent.id) if parent else duplicate_query.where(Folder.parent_id.is_(None))
+    if await db.scalar(duplicate_query):
+        raise _api_error(409, "FOLDER_EXISTS", "A folder with this name already exists")
+
+    folder = Folder(
+        name=name,
+        parent_id=parent.id if parent else None,
+        user_id=principal.user.id if principal.user else None,
+        project_id=principal.project.id,
+        created_by_service_account_id=principal.service_account.id if principal.service_account else None,
+        path=path,
+        depth=depth,
+    )
+    db.add(folder)
+    await db.commit()
+    await db.refresh(folder)
+    await _emit_event("FOLDER_CREATED", {
+        "folder_id": folder.id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder.name,
+        "path": folder.path,
+    })
+    return _project_folder_to_dict(folder)
+
+
+@app.delete("/api/v1/projects/{project_id}/folders/{folder_id}")
+async def delete_project_folder(
+    project_id: str,
+    folder_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    folder = await _get_project_folder(db, principal.project.id, folder_id)
+    child_count = await db.scalar(
+        select(func.count()).select_from(Folder).where(
+            Folder.parent_id == folder.id,
+            Folder.is_deleted == False,
+        )
+    )
+    file_count = await db.scalar(
+        select(func.count()).select_from(File).where(File.folder_id == folder.id)
+    )
+    if child_count or file_count:
+        raise _api_error(409, "FOLDER_NOT_EMPTY", "Move or delete folder contents first")
+    folder_name = folder.name
+    await db.delete(folder)
+    await db.commit()
+    await _emit_event("FOLDER_DELETED", {
+        "folder_id": folder_id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder_name,
+    })
+    return {"detail": "Project folder deleted"}
+
+
+@app.get("/api/v1/projects/{project_id}/files")
+async def list_project_files(
+    project_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    q: str | None = Query(None, max_length=255),
+    artifact_type: str | None = Query(None, max_length=120),
+    folder_id: str | None = Query(None),
+    starred: bool | None = Query(None),
+    sort_by: str = Query("created_at"),
+    sort_order: str = Query("desc"),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    query = select(File).where(
+        File.project_id == principal.project.id,
+        File.status == "AVAILABLE",
+        File.is_deleted == False,
+    )
+    if q:
+        query = query.where(File.original_name.ilike(f"%{q.strip()}%"))
+    artifact_expression = func.JSON_UNQUOTE(func.JSON_EXTRACT(File.metadata_json, "$.artifact_type"))
+    if artifact_type:
+        query = query.where(artifact_expression == artifact_type.strip())
+    if folder_id == "root":
+        query = query.where(File.folder_id.is_(None))
+    elif folder_id:
+        await _get_project_folder(db, principal.project.id, folder_id)
+        query = query.where(File.folder_id == folder_id)
+    if starred is not None:
+        if not principal.user:
+            raise _api_error(400, "INVALID_FILTER", "Star filtering is available to users only")
+        if starred:
+            query = query.join(
+                ProjectFileStar,
+                (ProjectFileStar.file_id == File.id)
+                & (ProjectFileStar.user_id == principal.user.id),
+            )
+        else:
+            query = query.outerjoin(
+                ProjectFileStar,
+                (ProjectFileStar.file_id == File.id)
+                & (ProjectFileStar.user_id == principal.user.id),
+            ).where(ProjectFileStar.file_id.is_(None))
+
+    sort_columns = {
+        "created_at": File.created_at,
+        "updated_at": File.updated_at,
+        "name": File.original_name,
+        "size": File.size,
+        "artifact_type": artifact_expression,
+    }
+    if sort_by not in sort_columns or sort_order not in {"asc", "desc"}:
+        raise _api_error(400, "INVALID_FILTER", "Invalid project file sort")
+    total = await db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    sort_column = sort_columns[sort_by]
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc())
+    result = await db.execute(query.limit(limit).offset(offset))
+    files = result.scalars().all()
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [item.id for item in files],
+    )
+    await db.commit()
+    return {
+        "files": [
+            _project_file_to_dict(item, is_starred=item.id in starred_ids)
+            for item in files
+        ],
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/files/upload", status_code=201)
+async def upload_project_file(
+    project_id: str,
+    file: UploadFile,
+    metadata_json: str = Form(...),
+    folder_id: str | None = Form(None),
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    project = principal.project
+    if project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    destination_folder = None
+    if folder_id:
+        destination_folder = await _get_project_folder(db, project.id, folder_id)
+    if not idempotency_key or len(idempotency_key) > 255:
+        raise _api_error(400, "INVALID_FILE", "Idempotency-Key is required and must be at most 255 characters")
+    if len(metadata_json.encode("utf-8")) > 16384:
+        raise _api_error(400, "INVALID_FILE", "metadata_json exceeds 16 KiB")
+
+    try:
+        metadata = json.loads(metadata_json)
+    except (TypeError, json.JSONDecodeError):
+        raise _api_error(400, "INVALID_FILE", "metadata_json must be a JSON object")
+    required_metadata = {"artifact_type", "logical_date", "source_run_id", "retention_class"}
+    if not isinstance(metadata, dict) or not required_metadata.issubset(metadata):
+        raise _api_error(400, "INVALID_FILE", "Required metadata fields are missing")
+
+    allowed_mime_types = (project.retention_policy or {}).get("allowed_mime_types")
+    content_type = file.content_type or "application/octet-stream"
+    if isinstance(allowed_mime_types, list) and allowed_mime_types and content_type not in allowed_mime_types:
+        raise _api_error(400, "INVALID_FILE", "File MIME type is not allowed by project policy")
+
+    hasher = hashlib.sha256()
+    file_size = 0
+    while chunk := await file.read(1024 * 1024):
+        hasher.update(chunk)
+        file_size += len(chunk)
+        if file_size > project.max_file_size:
+            raise _api_error(413, "FILE_TOO_LARGE", "File exceeds the project file-size limit")
+    await file.seek(0)
+    if file_size == 0:
+        raise _api_error(400, "INVALID_FILE", "Empty files are not accepted")
+    checksum = hasher.hexdigest()
+    supplied_checksum = metadata.get("checksum_sha256")
+    if supplied_checksum and supplied_checksum != checksum:
+        raise _api_error(400, "INVALID_FILE", "Supplied checksum does not match file content")
+    metadata["checksum_sha256"] = checksum
+
+    existing_result = await db.execute(
+        select(ProjectUpload).where(
+            ProjectUpload.project_id == project.id,
+            ProjectUpload.idempotency_key == idempotency_key,
+        )
+    )
+    upload = existing_result.scalar_one_or_none()
+    if upload:
+        if upload.checksum_sha256 != checksum:
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already exists for different content")
+        if upload.status == "AVAILABLE" and upload.file_id:
+            stored = await db.get(File, upload.file_id)
+            if stored and stored.status == "AVAILABLE" and not stored.is_deleted:
+                response = _project_file_to_dict(stored)
+                response["idempotent_replay"] = True
+                await db.commit()
+                return response
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotent upload result is no longer available")
+        if upload.status == "PENDING":
+            raise _api_error(409, "UPLOAD_IN_PROGRESS", "An upload with this idempotency key is in progress")
+
+    locked_result = await db.execute(
+        select(Project)
+        .where(Project.id == project.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_project = locked_result.scalar_one()
+    if upload and upload.status == "FAILED" and upload.reserved_bytes:
+        locked_project.storage_used = max(0, locked_project.storage_used - upload.reserved_bytes)
+        upload.reserved_bytes = 0
+    if locked_project.storage_used + file_size > locked_project.storage_quota:
+        PROJECT_QUOTA_REJECTIONS.labels(project=locked_project.slug).inc()
+        await _emit_event("QUOTA_EXCEEDED", {
+            "project_id": locked_project.id,
+            "user_id": principal.user.id if principal.user else None,
+            "service_account_id": principal.service_account.id if principal.service_account else None,
+            "attempted_bytes": file_size,
+            "storage_used": locked_project.storage_used,
+            "storage_quota": locked_project.storage_quota,
+        })
+        raise _api_error(413, "STORAGE_QUOTA_EXCEEDED", "Project storage quota exceeded")
+
+    stale_object_key = upload.object_key if upload and upload.status == "FAILED" else None
+    if upload:
+        upload.status = "PENDING"
+        upload.error_code = None
+        upload.reserved_bytes = file_size
+        upload.object_key = None
+        upload.user_id = principal.user.id if principal.user else None
+        upload.service_account_id = principal.service_account.id if principal.service_account else None
+    else:
+        upload = ProjectUpload(
+            project_id=locked_project.id,
+            service_account_id=principal.service_account.id if principal.service_account else None,
+            user_id=principal.user.id if principal.user else None,
+            idempotency_key=idempotency_key,
+            checksum_sha256=checksum,
+            reserved_bytes=file_size,
+            status="PENDING",
+        )
+        db.add(upload)
+    locked_project.storage_used += file_size
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_IN_PROGRESS", "Idempotency key was claimed by another request")
+    await db.refresh(upload)
+    if stale_object_key:
+        try:
+            await asyncio.to_thread(
+                minio_client.remove_object, settings.MINIO_BUCKET_FILES, stale_object_key
+            )
+        except Exception:
+            pass
+
+    file_id = str(uuid.uuid4())
+    original_name = os.path.basename(file.filename or "unnamed") or "unnamed"
+    if len(original_name) > 255:
+        await _release_project_reservation(db, locked_project.id, upload.id, "INVALID_FILE")
+        raise _api_error(400, "INVALID_FILE", "Filename exceeds 255 characters")
+    ext = original_name.rsplit(".", 1)[-1] if "." in original_name else ""
+    minio_key = f"projects/{locked_project.slug}/{file_id}{f'.{ext}' if ext else ''}"
+    upload.object_key = minio_key
+    try:
+        await db.commit()
+    except Exception:
+        await _release_project_reservation(db, locked_project.id, upload.id, "METADATA_WRITE_FAILED")
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Upload reservation could not be persisted")
+    try:
+        await asyncio.to_thread(
+            minio_client.put_object,
+            settings.MINIO_BUCKET_FILES,
+            minio_key,
+            file.file,
+            file_size,
+            content_type=content_type,
+        )
+    except Exception:
+        await _release_project_reservation(db, locked_project.id, upload.id, "STORAGE_UNAVAILABLE")
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Object storage is temporarily unavailable")
+
+    db_file = File(
+        id=file_id,
+        filename=f"{file_id}{f'.{ext}' if ext else ''}",
+        original_name=original_name,
+        mime_type=content_type,
+        size=file_size,
+        folder_id=destination_folder.id if destination_folder else None,
+        user_id=principal.user.id if principal.user else None,
+        project_id=locked_project.id,
+        created_by_service_account_id=principal.service_account.id if principal.service_account else None,
+        minio_bucket=settings.MINIO_BUCKET_FILES,
+        minio_key=minio_key,
+        checksum_sha256=checksum,
+        status="AVAILABLE",
+        metadata_json=metadata,
+        retention_until=_project_retention_until(locked_project, metadata),
+    )
+    db.add(db_file)
+    db.add(FileVersion(
+        file_id=file_id,
+        version_number=1,
+        minio_key=minio_key,
+        size=file_size,
+        checksum_sha256=checksum,
+        uploaded_by=principal.user.id if principal.user else None,
+        uploaded_by_service_account_id=principal.service_account.id if principal.service_account else None,
+    ))
+    upload.file_id = file_id
+    upload.status = "AVAILABLE"
+    upload.reserved_bytes = 0
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            await asyncio.to_thread(minio_client.remove_object, settings.MINIO_BUCKET_FILES, minio_key)
+        except Exception:
+            pass
+        await _release_project_reservation(db, locked_project.id, upload.id, "METADATA_WRITE_FAILED")
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "File metadata could not be committed")
+    try:
+        await db.refresh(db_file)
+    except Exception:
+        pass
+
+    await _emit_event("FILE_UPLOADED", {
+        "file_id": db_file.id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": locked_project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": db_file.original_name,
+        "mime_type": db_file.mime_type,
+        "size": file_size,
+        "minio_key": minio_key,
+    })
+    PROJECT_UPLOAD_BYTES.labels(project=locked_project.slug).inc(file_size)
+    return _project_file_to_dict(db_file)
+
+
+@app.get("/api/v1/projects/{project_id}/files/trash")
+async def list_project_trash(
+    project_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    result = await db.execute(
+        select(File)
+        .where(
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+        .order_by(File.deleted_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    files = result.scalars().all()
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [item.id for item in files],
+    )
+    await db.commit()
+    return {
+        "files": [
+            _project_file_to_dict(item, is_starred=item.id in starred_ids)
+            for item in files
+        ],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/star")
+async def star_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = file_result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    existing = await db.get(ProjectFileStar, (principal.user.id, stored.id))
+    if not existing:
+        db.add(ProjectFileStar(user_id=principal.user.id, file_id=stored.id))
+        await db.commit()
+        await _emit_event("FILE_STARRED", {
+            "file_id": stored.id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+            "filename": stored.original_name,
+        })
+    return {"file_id": stored.id, "is_starred": True}
+
+
+@app.delete("/api/v1/projects/{project_id}/files/{file_id}/star")
+async def unstar_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_result = await db.execute(
+        select(File.id).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+        )
+    )
+    if not file_result.scalar_one_or_none():
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    existing = await db.get(ProjectFileStar, (principal.user.id, file_id))
+    if existing:
+        await db.delete(existing)
+        await db.commit()
+        await _emit_event("FILE_UNSTARRED", {
+            "file_id": file_id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+        })
+    return {"file_id": file_id, "is_starred": False}
+
+
+@app.post("/api/v1/projects/{project_id}/files/bulk-star")
+async def bulk_star_project_files(
+    project_id: str,
+    req: ProjectBulkStarRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    if not principal.user:
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "File stars are available to users only")
+    file_ids = list(dict.fromkeys(req.file_ids))
+    files_result = await db.execute(
+        select(File.id).where(
+            File.id.in_(file_ids),
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    matched_ids = set(files_result.scalars().all())
+    if matched_ids != set(file_ids):
+        raise _api_error(404, "FILE_NOT_FOUND", "One or more project files were not found")
+
+    stars_result = await db.execute(
+        select(ProjectFileStar).where(
+            ProjectFileStar.user_id == principal.user.id,
+            ProjectFileStar.file_id.in_(file_ids),
+        )
+    )
+    existing_stars = stars_result.scalars().all()
+    if req.starred:
+        existing_ids = {item.file_id for item in existing_stars}
+        changed_ids = [file_id for file_id in file_ids if file_id not in existing_ids]
+        db.add_all([
+            ProjectFileStar(user_id=principal.user.id, file_id=file_id)
+            for file_id in changed_ids
+        ])
+    else:
+        changed_ids = [item.file_id for item in existing_stars]
+        for item in existing_stars:
+            await db.delete(item)
+    await db.commit()
+    event_type = "FILE_STARRED" if req.starred else "FILE_UNSTARRED"
+    for file_id in changed_ids:
+        await _emit_event(event_type, {
+            "file_id": file_id,
+            "project_id": principal.project.id,
+            "user_id": principal.user.id,
+        })
+    return {"file_ids": file_ids, "is_starred": req.starred}
+
+
+@app.post("/api/v1/projects/{project_id}/files/bulk-delete")
+async def bulk_delete_project_files(
+    project_id: str,
+    req: ProjectBulkFilesRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    file_ids = list(dict.fromkeys(req.file_ids))
+    result = await db.execute(
+        select(File).where(
+            File.id.in_(file_ids),
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored_files = result.scalars().all()
+    if {item.id for item in stored_files} != set(file_ids):
+        raise _api_error(404, "FILE_NOT_FOUND", "One or more project files were not found")
+
+    deleted_at = datetime.now(timezone.utc)
+    for stored in stored_files:
+        stored.is_deleted = True
+        stored.status = "DELETED"
+        stored.deleted_at = deleted_at
+    await db.commit()
+    for stored in stored_files:
+        await _emit_event("FILE_DELETED", {
+            "file_id": stored.id,
+            "user_id": principal.user.id if principal.user else None,
+            "project_id": principal.project.id,
+            "service_account_id": principal.service_account.id if principal.service_account else None,
+            "filename": stored.original_name,
+        })
+    return {"file_ids": file_ids, "detail": "Project files moved to trash"}
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/move")
+async def move_project_file(
+    project_id: str,
+    file_id: str,
+    req: ProjectFileMoveRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    destination = await _get_project_folder(db, principal.project.id, req.folder_id) if req.folder_id else None
+    stored.folder_id = destination.id if destination else None
+    await db.commit()
+    await db.refresh(stored)
+    await _emit_event("FILE_MOVED", {
+        "file_id": stored.id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+        "folder_id": stored.folder_id,
+    })
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
+
+
+@app.get("/api/v1/projects/{project_id}/files/{file_id}")
+async def get_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
+    await db.commit()
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
+
+
+@app.get("/api/v1/projects/{project_id}/files/{file_id}/download")
+async def download_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:read",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    try:
+        response = await asyncio.to_thread(
+            minio_client.get_object, stored.minio_bucket, stored.minio_key
+        )
+    except Exception:
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Object storage is temporarily unavailable")
+    await db.commit()
+    await _emit_event("FILE_DOWNLOADED", {
+        "file_id": stored.id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+    })
+    safe_name = stored.original_name.replace('"', "").replace("\r", "").replace("\n", "")
+    headers = {"Content-Disposition": f'attachment; filename="{safe_name}"'}
+    return StreamingResponse(_stream_minio_object(response), media_type=stored.mime_type, headers=headers)
+
+
+@app.delete("/api/v1/projects/{project_id}/files/{file_id}")
+async def delete_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found")
+    stored.is_deleted = True
+    stored.status = "DELETED"
+    stored.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    await _emit_event("FILE_DELETED", {
+        "file_id": stored.id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+    })
+    return {"detail": "Project file moved to trash"}
+
+
+@app.post("/api/v1/projects/{project_id}/files/{file_id}/restore")
+async def restore_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(409, "PROJECT_NOT_ACTIVE", "Restore the project before restoring files")
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found in trash")
+
+    stored.is_deleted = False
+    stored.status = "AVAILABLE"
+    stored.deleted_at = None
+    await db.commit()
+    await db.refresh(stored)
+    starred_ids = await _project_starred_ids(
+        db,
+        principal.user.id if principal.user else None,
+        [stored.id],
+    )
+    await _emit_event("FILE_RESTORED", {
+        "file_id": stored.id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": stored.original_name,
+    })
+    return _project_file_to_dict(stored, is_starred=stored.id in starred_ids)
+
+
+@app.delete("/api/v1/projects/{project_id}/files/{file_id}/permanent")
+async def permanently_delete_project_file(
+    project_id: str,
+    file_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"admin"},
+    )
+    result = await db.execute(
+        select(File).where(
+            File.id == file_id,
+            File.project_id == principal.project.id,
+            File.status == "DELETED",
+            File.is_deleted == True,
+        )
+    )
+    stored = result.scalar_one_or_none()
+    if not stored:
+        raise _api_error(404, "FILE_NOT_FOUND", "Project file not found in trash")
+
+    versions_result = await db.execute(
+        select(FileVersion).where(FileVersion.file_id == stored.id)
+    )
+    versions = versions_result.scalars().all()
+    stored_objects = {version.minio_key: version.size for version in versions}
+    stored_objects.setdefault(stored.minio_key, stored.size)
+
+    try:
+        for object_key in stored_objects:
+            await asyncio.to_thread(minio_client.remove_object, stored.minio_bucket, object_key)
+        if stored.thumbnail_key:
+            await asyncio.to_thread(
+                minio_client.remove_object,
+                settings.MINIO_BUCKET_THUMBNAILS,
+                stored.thumbnail_key,
+            )
+    except Exception:
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Object storage deletion failed; retry safely")
+
+    project_result = await db.execute(
+        select(Project).where(Project.id == principal.project.id).with_for_update()
+    )
+    locked_project = project_result.scalar_one()
+    released_bytes = sum(stored_objects.values())
+    original_name = stored.original_name
+    locked_project.storage_used = max(0, locked_project.storage_used - released_bytes)
+    await db.delete(stored)
+    await db.commit()
+
+    await _emit_event("FILE_PERMANENTLY_DELETED", {
+        "file_id": file_id,
+        "user_id": principal.user.id if principal.user else None,
+        "project_id": principal.project.id,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "filename": original_name,
+        "released_bytes": released_bytes,
+    })
+    return {"detail": "Project file permanently deleted", "released_bytes": released_bytes}
+
+
+# ══════════════════════════════════════════════
 # FILE UPLOAD / DOWNLOAD
 # ══════════════════════════════════════════════
 
-import asyncio
 import io
+
+@app.get("/api/v1/files/project-starred")
+async def list_starred_project_files(
+    limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = (
+        select(File, Project)
+        .join(ProjectFileStar, ProjectFileStar.file_id == File.id)
+        .join(Project, Project.id == File.project_id)
+        .where(
+            ProjectFileStar.user_id == user.id,
+            File.status == "AVAILABLE",
+            File.is_deleted == False,
+        )
+        .order_by(ProjectFileStar.created_at.desc())
+        .limit(limit)
+    )
+    if user.role != "admin":
+        query = query.join(
+            ProjectMembership,
+            (ProjectMembership.project_id == Project.id)
+            & (ProjectMembership.user_id == user.id),
+        )
+    result = await db.execute(query)
+    files = []
+    for stored, project in result.all():
+        item = _project_file_to_dict(stored, is_starred=True)
+        item["project_name"] = project.name
+        item["project_slug"] = project.slug
+        files.append(item)
+    return {"files": files}
+
 
 @app.post("/api/v1/files/upload", status_code=201)
 async def upload_file(
@@ -798,7 +2133,6 @@ async def list_folders(
     }
 
 from app.models import FolderPermission
-from pydantic import BaseModel
 
 class ShareFolderRequest(BaseModel):
     user_email: str

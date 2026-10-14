@@ -1,0 +1,14 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: cloudvault-operations
+  group_by: [alertname, project]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+# Receiver cục bộ giữ alert trong Alertmanager UI. Khi triển khai thật, thêm
+# email_configs hoặc webhook_configs theo runbook vận hành; không commit secret.
+receivers:
+  - name: cloudvault-operations

@@ -42,7 +42,10 @@ from app.dependencies import (
     get_current_user,
     init_auth_dependencies,
 )
-from app.models import User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily, FolderPermission
+from app.models import (
+    User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily,
+    FolderPermission, Project, ProjectMembership,
+)
 
 # ── Elasticsearch & Redis clients ──
 es_client: AsyncElasticsearch | None = None
@@ -618,12 +621,33 @@ async def suggest(
 async def get_activity(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    project_id: Optional[str] = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if project_id:
+        project_result = await db.execute(
+            select(Project).where((Project.id == project_id) | (Project.slug == project_id))
+        )
+        project = project_result.scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if user.role != "admin":
+            membership = await db.scalar(
+                select(ProjectMembership.id).where(
+                    ProjectMembership.project_id == project.id,
+                    ProjectMembership.user_id == user.id,
+                )
+            )
+            if not membership:
+                raise HTTPException(status_code=403, detail="Project access denied")
+        activity_filter = AuditLog.project_id == project.id
+    else:
+        activity_filter = AuditLog.user_id == user.id
+
     query = (
         select(AuditLog)
-        .where(AuditLog.user_id == user.id)
+        .where(activity_filter)
         .order_by(AuditLog.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -632,7 +656,7 @@ async def get_activity(
     logs = result.scalars().all()
 
     count_q = select(func.count()).select_from(
-        select(AuditLog).where(AuditLog.user_id == user.id).subquery()
+        select(AuditLog).where(activity_filter).subquery()
     )
     total = (await db.execute(count_q)).scalar() or 0
 
@@ -643,6 +667,9 @@ async def get_activity(
                 "action": log.action,
                 "resource_type": log.resource_type,
                 "resource_id": log.resource_id,
+                "user_id": log.user_id,
+                "project_id": log.project_id,
+                "service_account_id": log.service_account_id,
                 "details": log.details_json,
                 "created_at": log.created_at.isoformat() if log.created_at else None,
             }

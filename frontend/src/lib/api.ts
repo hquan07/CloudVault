@@ -230,6 +230,357 @@ export const fileApi = {
     request(`${FILE_BASE}/folders${parentId ? `?parent_id=${parentId}` : ''}`),
 };
 
+export interface Project {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  status: 'active' | 'suspended' | 'archived';
+  storage_quota: number;
+  storage_used: number;
+  max_file_size: number;
+  warning_percent: number;
+  retention_policy: Record<string, unknown> | null;
+  member_role: 'viewer' | 'editor' | 'admin' | null;
+  is_pinned: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectUsage {
+  project_id: string;
+  storage_used: number;
+  storage_quota: number;
+  available_bytes: number;
+  percentage: number;
+  warning_percent: number;
+}
+
+export interface ProjectOperationStatus {
+  project_id: string;
+  health_status: 'healthy' | 'warning' | 'critical' | 'unknown';
+  metadata_bytes?: number;
+  object_bytes?: number;
+  usage_drift_bytes?: number;
+  missing_objects?: number;
+  orphan_objects?: number;
+  stale_uploads?: number;
+  expired_files?: number;
+  details: Record<string, unknown>;
+  checked_at: string | null;
+}
+
+export interface ProjectFileFilters {
+  q?: string;
+  artifact_type?: string;
+  starred?: boolean;
+  sort_by?: 'created_at' | 'updated_at' | 'name' | 'size' | 'artifact_type';
+  sort_order?: 'asc' | 'desc';
+  folder_id?: string;
+}
+
+export interface ProjectFile {
+  id: string;
+  project_id: string;
+  folder_id: string | null;
+  original_name: string;
+  mime_type: string;
+  size: number;
+  checksum_sha256: string;
+  status: string;
+  is_deleted: boolean;
+  deleted_at: string | null;
+  is_starred: boolean;
+  metadata: Record<string, unknown>;
+  retention_until: string | null;
+  created_at: string;
+  updated_at: string;
+  project_name?: string;
+  project_slug?: string;
+}
+
+export interface ProjectFolder {
+  id: string;
+  project_id: string;
+  name: string;
+  parent_id: string | null;
+  path: string;
+  depth: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuditActivity {
+  id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  user_id: string | null;
+  project_id: string | null;
+  service_account_id: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ProjectMember {
+  id: string;
+  project_id: string;
+  user_id: string;
+  role: 'viewer' | 'editor' | 'admin';
+  username: string;
+  email: string;
+  created_at: string;
+}
+
+export interface ServiceAccount {
+  id: string;
+  project_id: string;
+  name: string;
+  token_prefix: string | null;
+  scopes: string[];
+  is_active: boolean;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  token?: string;
+}
+
+/* ── Project API ── */
+export const projectApi = {
+  list: () => request<Project[]>(`${AUTH_BASE}/projects`),
+
+  get: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}`),
+
+  create: (data: {
+    slug: string;
+    name: string;
+    description?: string;
+    storage_quota: number;
+    max_file_size: number;
+    warning_percent: number;
+    retention_policy?: Record<string, unknown>;
+  }) => request<Project>(`${AUTH_BASE}/projects`, {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+
+  update: (projectId: string, data: {
+    name?: string;
+    description?: string;
+    status?: 'active' | 'suspended';
+    storage_quota?: number;
+    max_file_size?: number;
+    warning_percent?: number;
+    retention_policy?: Record<string, unknown>;
+  }) => request<Project>(`${AUTH_BASE}/projects/${projectId}`, {
+    method: 'PUT', body: JSON.stringify(data),
+  }),
+
+  archive: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/archive`, { method: 'POST' }),
+
+  restore: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/restore`, { method: 'POST' }),
+
+  delete: (projectId: string, confirmSlug: string) =>
+    request<void>(`${AUTH_BASE}/projects/${projectId}`, {
+      method: 'DELETE', body: JSON.stringify({ confirm_slug: confirmSlug }),
+    }),
+
+  pin: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/pin`, { method: 'POST' }),
+
+  unpin: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/pin`, { method: 'DELETE' }),
+
+  getUsage: (projectId: string) =>
+    request<ProjectUsage>(`${FILE_BASE}/projects/${projectId}/usage`),
+
+  getOperations: (projectId: string) =>
+    request<ProjectOperationStatus>(`${FILE_BASE}/projects/${projectId}/operations`),
+
+  listFiles: (projectId: string, filters: ProjectFileFilters = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') query.set(key, String(value));
+    });
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return request<{ files: ProjectFile[]; limit: number; offset: number; total: number }>(
+      `${FILE_BASE}/projects/${projectId}/files${suffix}`
+    );
+  },
+
+  listTrash: (projectId: string) =>
+    request<{ files: ProjectFile[]; limit: number; offset: number }>(
+      `${FILE_BASE}/projects/${projectId}/files/trash`
+    ),
+
+  uploadWithProgress: async (
+    projectId: string,
+    file: File,
+    metadata: Record<string, unknown>,
+    onProgress: (percent: number) => void,
+    signal?: AbortSignal,
+    folderId?: string | null,
+  ) => {
+    const idempotencyKey = crypto.randomUUID();
+    const uploadOnce = () => new Promise<ProjectFile>((resolve, reject) => {
+      const formData = new FormData();
+      formData.append('file', file, file.name);
+      formData.append('metadata_json', JSON.stringify(metadata));
+      if (folderId) formData.append('folder_id', folderId);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${FILE_BASE}/projects/${projectId}/files/upload`);
+      const token = getToken();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.setRequestHeader('Idempotency-Key', idempotencyKey);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.onload = () => {
+        const data = JSON.parse(xhr.responseText || '{}');
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data as ProjectFile);
+        else {
+          const detail = data.detail;
+          const message = typeof detail === 'object' ? detail?.message : detail;
+          reject(new ApiError(message || 'Upload failed', xhr.status, data));
+        }
+      };
+      xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
+      xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'));
+      signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+      xhr.send(formData);
+    });
+
+    try {
+      return await uploadOnce();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401 && await refreshAccessToken()) {
+        return uploadOnce();
+      }
+      throw error;
+    }
+  },
+
+  downloadFile: async (projectId: string, fileId: string) => {
+    const downloadOnce = () => fetch(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/download`,
+      { headers: { Authorization: `Bearer ${getToken() || ''}` }, cache: 'no-store' },
+    );
+    let response = await downloadOnce();
+    if (response.status === 401 && await refreshAccessToken()) response = await downloadOnce();
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const detail = data.detail;
+      const message = typeof detail === 'object' ? detail?.message : detail;
+      throw new ApiError(message || 'Download failed', response.status, data);
+    }
+    return response.blob();
+  },
+
+  deleteFile: (projectId: string, fileId: string) =>
+    request(`${FILE_BASE}/projects/${projectId}/files/${fileId}`, { method: 'DELETE' }),
+
+  restoreFile: (projectId: string, fileId: string) =>
+    request<ProjectFile>(`${FILE_BASE}/projects/${projectId}/files/${fileId}/restore`, {
+      method: 'POST',
+    }),
+
+  permanentlyDeleteFile: (projectId: string, fileId: string) =>
+    request<{ detail: string; released_bytes: number }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/permanent`,
+      { method: 'DELETE' },
+    ),
+
+  starFile: (projectId: string, fileId: string) =>
+    request<{ file_id: string; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/star`,
+      { method: 'POST' },
+    ),
+
+  unstarFile: (projectId: string, fileId: string) =>
+    request<{ file_id: string; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/${fileId}/star`,
+      { method: 'DELETE' },
+    ),
+
+  listStarredFiles: () =>
+    request<{ files: ProjectFile[] }>(`${FILE_BASE}/files/project-starred`),
+
+  bulkStarFiles: (projectId: string, fileIds: string[], starred: boolean) =>
+    request<{ file_ids: string[]; is_starred: boolean }>(
+      `${FILE_BASE}/projects/${projectId}/files/bulk-star`,
+      { method: 'POST', body: JSON.stringify({ file_ids: fileIds, starred }) },
+    ),
+
+  bulkDeleteFiles: (projectId: string, fileIds: string[]) =>
+    request<{ file_ids: string[]; detail: string }>(
+      `${FILE_BASE}/projects/${projectId}/files/bulk-delete`,
+      { method: 'POST', body: JSON.stringify({ file_ids: fileIds }) },
+    ),
+
+  listFolders: (projectId: string, parentId?: string | null) => {
+    const suffix = parentId ? `?parent_id=${encodeURIComponent(parentId)}` : '';
+    return request<{ folders: ProjectFolder[] }>(
+      `${FILE_BASE}/projects/${projectId}/folders${suffix}`,
+    );
+  },
+
+  createFolder: (projectId: string, name: string, parentId?: string | null) =>
+    request<ProjectFolder>(`${FILE_BASE}/projects/${projectId}/folders`, {
+      method: 'POST', body: JSON.stringify({ name, parent_id: parentId || null }),
+    }),
+
+  deleteFolder: (projectId: string, folderId: string) =>
+    request<{ detail: string }>(`${FILE_BASE}/projects/${projectId}/folders/${folderId}`, {
+      method: 'DELETE',
+    }),
+
+  moveFile: (projectId: string, fileId: string, folderId?: string | null) =>
+    request<ProjectFile>(`${FILE_BASE}/projects/${projectId}/files/${fileId}/move`, {
+      method: 'POST', body: JSON.stringify({ folder_id: folderId || null }),
+    }),
+
+  listMembers: (projectId: string) =>
+    request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),
+
+  addMember: (projectId: string, userId: string, role: ProjectMember['role']) =>
+    request<ProjectMember>(`${AUTH_BASE}/projects/${projectId}/members`, {
+      method: 'POST', body: JSON.stringify({ user_id: userId, role }),
+    }),
+
+  updateMember: (projectId: string, memberId: string, role: ProjectMember['role']) =>
+    request<ProjectMember>(`${AUTH_BASE}/projects/${projectId}/members/${memberId}`, {
+      method: 'PUT', body: JSON.stringify({ role }),
+    }),
+
+  removeMember: (projectId: string, memberId: string) =>
+    request(`${AUTH_BASE}/projects/${projectId}/members/${memberId}`, { method: 'DELETE' }),
+
+  listServiceAccounts: (projectId: string) =>
+    request<ServiceAccount[]>(`${AUTH_BASE}/projects/${projectId}/service-accounts`),
+
+  createServiceAccount: (projectId: string, data: { name: string; scopes: string[] }) =>
+    request<ServiceAccount>(`${AUTH_BASE}/projects/${projectId}/service-accounts`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  rotateServiceAccount: (projectId: string, accountId: string) =>
+    request<ServiceAccount>(
+      `${AUTH_BASE}/projects/${projectId}/service-accounts/${accountId}/rotate`,
+      { method: 'POST' },
+    ),
+
+  revokeServiceAccount: (projectId: string, accountId: string) =>
+    request(
+      `${AUTH_BASE}/projects/${projectId}/service-accounts/${accountId}`,
+      { method: 'DELETE' },
+    ),
+};
+
 /* ── Metadata API ── */
 export const metaApi = {
   listFiles: (params: Record<string, string | number | boolean>) => {
@@ -275,8 +626,13 @@ export const metaApi = {
   suggest: (q: string) =>
     request(`${META_BASE}/search/suggest?q=${encodeURIComponent(q)}`),
 
-  getActivity: (page = 1, pageSize = 20) =>
-    request(`${META_BASE}/activity?page=${page}&page_size=${pageSize}`),
+  getActivity: (page = 1, pageSize = 20, projectId?: string) => {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (projectId) query.set('project_id', projectId);
+    return request<{ activities: AuditActivity[]; total: number; page: number; page_size: number }>(
+      `${META_BASE}/activity?${query.toString()}`,
+    );
+  },
 };
 
 /* ── Admin API ── */

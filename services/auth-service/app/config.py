@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Optional, explicit bootstrap identity. Leave empty in environments that
+    # provision administrators through their own identity-management process.
+    BOOTSTRAP_ADMIN_EMAIL: str = ""
+
     # MySQL
     MYSQL_DATABASE: str = "cloudvault"
     MYSQL_USER: str = "cloudvault"
