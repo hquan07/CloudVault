@@ -4,7 +4,11 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="895a09e9-b5ff-439f-a60f-f86a86a4442f" name="Changes" comment="" />
+    <list default="true" id="895a09e9-b5ff-439f-a60f-f86a86a4442f" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/services/file-service/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/services/file-service/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/workers/project-operations/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/workers/project-operations/main.py" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -71,9 +75,9 @@
     "codeWithMe.voiceChat.enabledByDefault": "false",
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
     "copilot.chat.legacySessionMetadata.migrated": "true",
-    "git-widget-placeholder": "feature/project-storage-integration",
+    "git-widget-placeholder": "newvers/phase-1-correctness-safety",
     "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "/home/hquan07/Desktop/CloudVault_Recovered",
+    "last_opened_file_path": "/home/hquan07/Desktop/Real-Time_Stock_Prediction_Pipeline",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.jshint": "true",
     "node.js.detected.package.tslint": "true",
@@ -81,6 +85,7 @@
     "node.js.selected.package.jshint": "",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
+    "python.packages.toolwindow.project.migrated.to.right.top.v2": "true",
     "settings.editor.selected.configurable": "application.passwordSafe",
     "to.speed.mode.migration.done": "true"
   }
@@ -116,7 +121,7 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-6fa658e1df1a-5bd6d13a2a75-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.8665.369" />
+        <option value="bundled-python-sdk-73a66231627c-5bd6d13a2a75-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.10968.92" />
       </set>
     </attachedChunks>
   </component>
@@ -131,6 +136,9 @@
       <workItem from="1791880516871" duration="5955000" />
       <workItem from="1791919456693" duration="10000" />
       <workItem from="1791920164113" duration="919000" />
+      <workItem from="1791958263725" duration="8511000" />
+      <workItem from="1791990183449" duration="15000" />
+      <workItem from="1791992888486" duration="297000" />
     </task>
     <servers />
   </component>
