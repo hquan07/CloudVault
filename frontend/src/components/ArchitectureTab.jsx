@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -11,138 +11,145 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
-  Monitor,
-  Server,
-  TerminalSquare,
-  Database,
   Activity,
-  Zap,
-  Globe,
-  Shield,
-  Folder,
-  FileText,
-  Share2,
-  Bell,
-  Lock,
   Archive,
+  Bell,
+  Database,
+  FileText,
+  Folder,
+  Globe,
   Image,
+  Lock,
+  Monitor,
   Search,
-  User
+  Server,
+  Share2,
+  Shield,
+  TerminalSquare,
+  User,
+  Zap,
 } from 'lucide-react';
 
-// --- Architecture metadata shown when a node is selected ---
-const getMetricsForNode = (nodeId) => {
-  const metricsMap = {
-    user: { desc: 'Platform Users', stat: 'Browser client' },
-    web: { desc: 'Next.js App', stat: 'Server and client rendering' },
-    file_preview: { desc: 'Preview Component', stat: 'Media, text, PDF and versions' },
-    share_ui: { desc: 'Share Component', stat: 'Managed links and folder roles' },
-    auth_context: { desc: 'React Context', stat: 'Session and profile state' },
-    notifications: { desc: 'WebSocket Connection', stat: 'Redis-backed activity events' },
-    api_client: { desc: 'API Client', stat: 'Fetch, refresh and retry' },
-    nginx: { desc: 'Nginx Gateway', stat: 'Exposure: Public host entry point' },
-    
-    auth: { desc: 'FastAPI Auth', stat: 'Live health endpoint' },
-    files: { desc: 'Streaming File API', stat: 'Chunk Buffer: 1MB' },
-    metadata: { desc: 'Metadata + WebSocket', stat: 'Live health endpoint' },
-    
-    kafka: { desc: 'Apache Kafka', stat: 'Network: Docker-internal only' },
-    redis: { desc: 'Redis Cache/PubSub', stat: 'Authenticated · Docker-internal only' },
-    
-    audit_worker: { desc: 'Audit Logger', stat: 'Dedicated Kafka consumer group' },
-    zip_worker: { desc: 'ZIP Extractor', stat: 'Quota and archive safety guards' },
-    thumbnail_worker: { desc: 'Thumbnail Worker', stat: 'Asynchronous image processing' },
-    search_worker: { desc: 'Search Indexer', stat: 'Least-privilege Elasticsearch writer' },
-    notification_relay: { desc: 'Kafka → Redis Relay', stat: 'Consumer Group: metadata-notifications' },
-    
-    mysql: { desc: 'MySQL DB', stat: 'Network: Docker-internal only' },
-    minio: { desc: 'MinIO Storage', stat: 'Host access: Loopback only' },
-    elasticsearch: { desc: 'Elasticsearch', stat: 'Auth: cloudvault_app · Internal only' },
-  };
-  return metricsMap[nodeId] || { desc: 'System Component', stat: 'Healthy' };
+const nodeDetails = {
+  user: { desc: 'Browser user', stat: 'JWT · UI · REST · WebSocket' },
+  project_clients: { desc: 'Connected project uploaders', stat: 'E-commerce · News_Flow · Real-Time Stock' },
+  shared_network: { desc: 'External Docker network', stat: 'Gateway alias: cloudvault-api' },
+  nginx: { desc: 'Nginx Gateway', stat: 'Only shared/public entry point' },
+  web: { desc: 'Next.js 16 frontend', stat: 'Personal and project storage UI' },
+  projects_ui: { desc: 'Projects UI', stat: 'Files · members · access · policy · activity' },
+  file_preview: { desc: 'Preview Component', stat: 'Media · PDF · text · JSON · XML · CSV' },
+  notifications: { desc: 'Notification UI', stat: 'Authenticated WebSocket activity' },
+  api_client: { desc: 'Same-origin API client', stat: 'JWT refresh · project requests · retry' },
+  auth: { desc: 'FastAPI Auth Service', stat: 'Users · projects · membership · service accounts' },
+  files: { desc: 'FastAPI File Service', stat: 'Streaming · idempotency · quota reservation' },
+  metadata: { desc: 'FastAPI Metadata Service', stat: 'Sharing · search · activity · WebSocket' },
+  mysql: { desc: 'MySQL 8', stat: 'Personal/project metadata and audit' },
+  minio: { desc: 'MinIO object storage', stat: 'Files · versions · thumbnails · avatars' },
+  kafka: { desc: 'Apache Kafka', stat: 'Internal file-events and user-events topics' },
+  redis: { desc: 'Redis 7', stat: 'JWT revocation · Pub/Sub' },
+  elasticsearch: { desc: 'Elasticsearch 8.11', stat: 'Authenticated least-privilege search' },
+  audit_worker: { desc: 'Audit Logger', stat: 'Kafka events → MySQL audit trail' },
+  zip_worker: { desc: 'Guarded ZIP Extractor', stat: 'Quota and archive safety limits' },
+  thumbnail_worker: { desc: 'Thumbnail Worker', stat: 'MinIO derivatives · notifications' },
+  search_worker: { desc: 'Search Indexer', stat: 'MinIO content → Elasticsearch' },
+  notification_relay: { desc: 'Notification Relay', stat: 'metadata-notifications consumer group' },
+  project_ops: { desc: 'Project Operations', stat: 'Reconciliation · retention · metrics :9100' },
+  mysql_migrate: { desc: 'One-shot migration job', stat: 'Ordered idempotent migrations 002–008' },
+  prometheus: { desc: 'Prometheus', stat: 'Project quota and integrity metrics' },
+  grafana: { desc: 'Grafana', stat: 'Project operations dashboard' },
+  alertmanager: { desc: 'Alertmanager', stat: 'Quota · drift · object and worker alerts' },
+  jaeger: { desc: 'Jaeger', stat: 'OpenTelemetry API traces' },
 };
 
-// --- Custom Node Component ---
+const iconMap = {
+  activity: Activity,
+  archive: Archive,
+  bell: Bell,
+  database: Database,
+  filetext: FileText,
+  folder: Folder,
+  globe: Globe,
+  image: Image,
+  lock: Lock,
+  monitor: Monitor,
+  search: Search,
+  server: Server,
+  share: Share2,
+  shield: Shield,
+  terminal: TerminalSquare,
+  user: User,
+  zap: Zap,
+};
+
 const CustomNode = ({ id, data }) => {
-  const [showMetrics, setShowMetrics] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
   const health = data.health || 'documented';
-  const isHealthy = health !== 'unhealthy';
-
-  // Icons mapping
-  const IconMap = {
-    monitor: Monitor,
-    globe: Globe,
-    server: Server,
-    terminal: TerminalSquare,
-    database: Database,
-    activity: Activity,
-    zap: Zap,
-    shield: Shield,
-    folder: Folder,
-    filetext: FileText,
-    share: Share2,
-    bell: Bell,
-    lock: Lock,
-    archive: Archive,
-    image: Image,
-    search: Search,
-    user: User
-  };
-  
-  const Icon = IconMap[data.icon] || Server;
-
-  const handleClick = () => setShowMetrics(!showMetrics);
-
-  const metrics = getMetricsForNode(id);
+  const isUnhealthy = health === 'unhealthy';
+  const Icon = iconMap[data.icon] || Server;
+  const details = nodeDetails[id] || { desc: 'System component', stat: 'Documented topology' };
 
   return (
     <div
-      onClick={handleClick}
+      onClick={() => setShowDetails((current) => !current)}
       style={{
-        padding: '12px 16px',
+        padding: '11px 14px',
         borderRadius: '12px',
-        background: isHealthy ? 'rgba(30, 41, 59, 0.9)' : 'rgba(127, 29, 29, 0.9)',
-        border: `2px solid ${isHealthy ? data.color || '#475569' : '#ef4444'}`,
+        background: isUnhealthy ? 'rgba(127, 29, 29, 0.92)' : 'rgba(30, 41, 59, 0.92)',
+        border: `2px solid ${isUnhealthy ? '#ef4444' : data.color || '#475569'}`,
         color: '#fff',
-        width: '200px',
-        boxShadow: isHealthy ? '0 4px 6px -1px rgba(0, 0, 0, 0.3)' : '0 0 15px rgba(239, 68, 68, 0.7)',
+        width: '190px',
+        boxShadow: isUnhealthy ? '0 0 15px rgba(239, 68, 68, 0.7)' : '0 4px 6px -1px rgba(0, 0, 0, 0.3)',
         position: 'relative',
         transition: 'all 0.3s ease',
-        cursor: 'pointer'
+        cursor: 'pointer',
       }}
     >
       <Handle type="target" position={Position.Top} style={{ background: '#94a3b8' }} />
-      
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-        <div style={{ padding: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '8px', display: 'flex' }}>
-          <Icon size={20} color={isHealthy ? (data.color || '#fff') : '#fff'} />
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{ padding: '7px', background: 'rgba(255,255,255,0.1)', borderRadius: '8px', display: 'flex' }}>
+          <Icon size={19} color={isUnhealthy ? '#fff' : data.color || '#fff'} />
         </div>
-        <div>
-          <div style={{ fontWeight: 600, fontSize: '14px' }}>{data.label}</div>
-          <div style={{ fontSize: '11px', color: '#cbd5e1' }}>{data.sublabel}</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: '13px' }}>{data.label}</div>
+          <div style={{ fontSize: '10px', color: '#cbd5e1' }}>{data.sublabel}</div>
         </div>
       </div>
 
-      {/* Health Status Indicator */}
-      <div style={{
-        position: 'absolute', top: '-6px', right: '-6px',
-        width: '14px', height: '14px', borderRadius: '50%',
-        background: health === 'healthy' ? '#22c55e' : health === 'unhealthy' ? '#ef4444' : '#64748b',
-        border: '2px solid #0f172a',
-        boxShadow: health === 'healthy' ? '0 0 8px #22c55e' : health === 'unhealthy' ? '0 0 8px #ef4444' : 'none',
-        animation: health === 'unhealthy' ? 'pulse 1s infinite' : 'none'
-      }} />
+      <div
+        title={health === 'documented' ? 'Documented component' : `Health: ${health}`}
+        style={{
+          position: 'absolute',
+          top: '-6px',
+          right: '-6px',
+          width: '14px',
+          height: '14px',
+          borderRadius: '50%',
+          background: health === 'healthy' ? '#22c55e' : isUnhealthy ? '#ef4444' : '#64748b',
+          border: '2px solid #0f172a',
+          boxShadow: health === 'healthy' ? '0 0 8px #22c55e' : isUnhealthy ? '0 0 8px #ef4444' : 'none',
+          animation: isUnhealthy ? 'pulse 1s infinite' : 'none',
+        }}
+      />
 
-      {/* Metrics Tooltip */}
-      {showMetrics && (
-        <div style={{
-          position: 'absolute', top: '105%', left: 0, width: '100%',
-          background: 'rgba(15, 23, 42, 0.95)', border: '1px solid #334155',
-          borderRadius: '8px', padding: '10px', fontSize: '12px', zIndex: 50,
-          boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)'
-        }}>
-          <div style={{ color: '#94a3b8', marginBottom: '4px' }}>{metrics.desc}</div>
-          <div style={{ fontWeight: 'bold', color: '#38bdf8' }}>{metrics.stat}</div>
+      {showDetails && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '108%',
+            left: 0,
+            width: '220px',
+            background: 'rgba(15, 23, 42, 0.98)',
+            border: '1px solid #334155',
+            borderRadius: '8px',
+            padding: '10px',
+            fontSize: '11px',
+            zIndex: 50,
+            boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
+          }}
+        >
+          <div style={{ color: '#94a3b8', marginBottom: '4px' }}>{details.desc}</div>
+          <div style={{ fontWeight: 'bold', color: '#38bdf8' }}>{details.stat}</div>
         </div>
       )}
 
@@ -151,122 +158,123 @@ const CustomNode = ({ id, data }) => {
   );
 };
 
-const nodeTypes = {
-  custom: CustomNode,
-};
+const nodeTypes = { custom: CustomNode };
 
-// --- Initial Nodes Data ---
 const initialNodes = [
-  // Layer 1
-  { id: 'user', type: 'custom', position: { x: 600, y: 0 }, data: { label: 'End User', sublabel: 'Client', icon: 'user', color: '#3b82f6' } },
-  
-  // Layer 1.5
-  { id: 'nginx', type: 'custom', position: { x: 600, y: 120 }, data: { label: 'Nginx LB', sublabel: 'Public Host Entry', icon: 'globe', color: '#10b981' } },
+  // External actors
+  { id: 'user', type: 'custom', position: { x: 260, y: 0 }, data: { label: 'Browser User', sublabel: 'JWT Client', icon: 'user', color: '#3b82f6' } },
+  { id: 'project_clients', type: 'custom', position: { x: 900, y: 0 }, data: { label: 'Project Clients', sublabel: 'Service Token Uploaders', icon: 'server', color: '#8b5cf6' } },
 
-  // Layer 2
-  { id: 'web', type: 'custom', position: { x: 600, y: 240 }, data: { label: 'Next.js App', sublabel: 'Web Application', icon: 'monitor', color: '#3b82f6' } },
-  
-  // Layer 3
-  { id: 'file_preview', type: 'custom', position: { x: 100, y: 240 }, data: { label: 'File Preview', sublabel: 'UI Component', icon: 'filetext', color: '#3b82f6' } },
-  { id: 'share_ui', type: 'custom', position: { x: 350, y: 240 }, data: { label: 'Share UI', sublabel: 'UI Component', icon: 'share', color: '#3b82f6' } },
-  { id: 'auth_context', type: 'custom', position: { x: 850, y: 240 }, data: { label: 'Auth State', sublabel: 'React Context', icon: 'lock', color: '#3b82f6' } },
-  { id: 'notifications', type: 'custom', position: { x: 1100, y: 240 }, data: { label: 'Notifications', sublabel: 'UI Component', icon: 'bell', color: '#3b82f6' } },
-  
-  // Layer 4
-  { id: 'api_client', type: 'custom', position: { x: 600, y: 360 }, data: { label: 'API Client', sublabel: 'Fetch + Token Refresh', icon: 'activity', color: '#3b82f6' } },
-  
-  // Layer 5 Services
-  { id: 'auth', type: 'custom', position: { x: 350, y: 520 }, data: { label: 'Auth Service', sublabel: 'FastAPI', icon: 'shield', color: '#f59e0b' } },
-  { id: 'files', type: 'custom', position: { x: 600, y: 520 }, data: { label: 'File Service', sublabel: 'Streaming FastAPI', icon: 'folder', color: '#f59e0b' } },
-  { id: 'metadata', type: 'custom', position: { x: 850, y: 520 }, data: { label: 'Metadata Service', sublabel: 'REST + WebSocket', icon: 'server', color: '#f59e0b' } },
-  
-  // Layer 6 Event Bus & Cache
-  { id: 'kafka', type: 'custom', position: { x: 725, y: 680 }, data: { label: 'Kafka', sublabel: 'Internal Message Broker', icon: 'zap', color: '#ef4444' } },
-  { id: 'redis', type: 'custom', position: { x: 1100, y: 680 }, data: { label: 'Redis', sublabel: 'Authenticated · Internal', icon: 'database', color: '#ef4444' } },
-  
-  // Layer 7 Workers
-  { id: 'audit_worker', type: 'custom', position: { x: 100, y: 840 }, data: { label: 'Audit Logger', sublabel: 'Python Worker', icon: 'terminal', color: '#10b981' } },
-  { id: 'zip_worker', type: 'custom', position: { x: 350, y: 840 }, data: { label: 'ZIP Extractor', sublabel: 'Quota + Safety Guards', icon: 'archive', color: '#10b981' } },
-  { id: 'thumbnail_worker', type: 'custom', position: { x: 725, y: 840 }, data: { label: 'Thumbnail Gen', sublabel: 'Python Worker', icon: 'image', color: '#10b981' } },
-  { id: 'search_worker', type: 'custom', position: { x: 975, y: 840 }, data: { label: 'Search Indexer', sublabel: 'Python Worker', icon: 'search', color: '#10b981' } },
-  { id: 'notification_relay', type: 'custom', position: { x: 1225, y: 840 }, data: { label: 'Notification Relay', sublabel: 'Metadata Consumer', icon: 'bell', color: '#10b981' } },
-  
-  // Layer 8 Databases
-  { id: 'mysql', type: 'custom', position: { x: 225, y: 1000 }, data: { label: 'MySQL', sublabel: 'Internal Relational DB', icon: 'database', color: '#ef4444' } },
-  { id: 'minio', type: 'custom', position: { x: 500, y: 1000 }, data: { label: 'MinIO', sublabel: 'Loopback Admin Access', icon: 'database', color: '#ef4444' } },
-  { id: 'elasticsearch', type: 'custom', position: { x: 975, y: 1000 }, data: { label: 'Elasticsearch', sublabel: 'Authenticated · Internal', icon: 'database', color: '#ef4444' } },
+  // Gateway and presentation
+  { id: 'nginx', type: 'custom', position: { x: 420, y: 130 }, data: { label: 'Nginx Gateway', sublabel: 'Public / Shared Entry', icon: 'globe', color: '#10b981' } },
+  { id: 'shared_network', type: 'custom', position: { x: 900, y: 130 }, data: { label: 'cloudvault-shared', sublabel: 'External Docker Network', icon: 'share', color: '#8b5cf6' } },
+  { id: 'web', type: 'custom', position: { x: 120, y: 270 }, data: { label: 'Next.js App', sublabel: 'Web Application', icon: 'monitor', color: '#3b82f6' } },
+  { id: 'projects_ui', type: 'custom', position: { x: 0, y: 400 }, data: { label: 'Projects UI', sublabel: 'Storage / Access / Policy', icon: 'folder', color: '#3b82f6' } },
+  { id: 'file_preview', type: 'custom', position: { x: 220, y: 400 }, data: { label: 'File Preview', sublabel: 'Personal + Project Files', icon: 'filetext', color: '#3b82f6' } },
+  { id: 'notifications', type: 'custom', position: { x: 440, y: 400 }, data: { label: 'Notifications', sublabel: 'WebSocket UI', icon: 'bell', color: '#3b82f6' } },
+  { id: 'api_client', type: 'custom', position: { x: 660, y: 270 }, data: { label: 'API Client', sublabel: 'Same-Origin Requests', icon: 'activity', color: '#3b82f6' } },
+
+  // API services
+  { id: 'auth', type: 'custom', position: { x: 180, y: 550 }, data: { label: 'Auth Service', sublabel: 'Users + Projects + Access', icon: 'shield', color: '#f59e0b' } },
+  { id: 'files', type: 'custom', position: { x: 470, y: 550 }, data: { label: 'File Service', sublabel: 'Personal + Project I/O', icon: 'folder', color: '#f59e0b' } },
+  { id: 'metadata', type: 'custom', position: { x: 760, y: 550 }, data: { label: 'Metadata Service', sublabel: 'Search + Share + WebSocket', icon: 'server', color: '#f59e0b' } },
+
+  // Data and messaging
+  { id: 'mysql', type: 'custom', position: { x: 0, y: 710 }, data: { label: 'MySQL', sublabel: 'Relational Metadata', icon: 'database', color: '#ef4444' } },
+  { id: 'minio', type: 'custom', position: { x: 220, y: 710 }, data: { label: 'MinIO', sublabel: 'Object + Version Storage', icon: 'database', color: '#ef4444' } },
+  { id: 'kafka', type: 'custom', position: { x: 440, y: 710 }, data: { label: 'Kafka', sublabel: 'Internal Event Bus', icon: 'zap', color: '#ef4444' } },
+  { id: 'redis', type: 'custom', position: { x: 660, y: 710 }, data: { label: 'Redis', sublabel: 'Revocation + Pub/Sub', icon: 'database', color: '#ef4444' } },
+  { id: 'elasticsearch', type: 'custom', position: { x: 880, y: 710 }, data: { label: 'Elasticsearch', sublabel: 'Authenticated Search', icon: 'search', color: '#ef4444' } },
+  { id: 'jaeger', type: 'custom', position: { x: 1100, y: 550 }, data: { label: 'Jaeger', sublabel: 'OpenTelemetry Traces', icon: 'search', color: '#06b6d4' } },
+
+  // Workers
+  { id: 'audit_worker', type: 'custom', position: { x: 0, y: 880 }, data: { label: 'Audit Logger', sublabel: 'Kafka Consumer', icon: 'terminal', color: '#10b981' } },
+  { id: 'zip_worker', type: 'custom', position: { x: 220, y: 880 }, data: { label: 'ZIP Extractor', sublabel: 'Guarded Worker', icon: 'archive', color: '#10b981' } },
+  { id: 'thumbnail_worker', type: 'custom', position: { x: 440, y: 880 }, data: { label: 'Thumbnail Worker', sublabel: 'Image Derivatives', icon: 'image', color: '#10b981' } },
+  { id: 'search_worker', type: 'custom', position: { x: 660, y: 880 }, data: { label: 'Search Indexer', sublabel: 'Content Indexing', icon: 'search', color: '#10b981' } },
+  { id: 'notification_relay', type: 'custom', position: { x: 880, y: 880 }, data: { label: 'Notification Relay', sublabel: 'Kafka → Redis', icon: 'bell', color: '#10b981' } },
+  { id: 'project_ops', type: 'custom', position: { x: 1100, y: 880 }, data: { label: 'Project Operations', sublabel: 'Reconcile + Retention', icon: 'activity', color: '#10b981' } },
+
+  // Migration and monitoring
+  { id: 'mysql_migrate', type: 'custom', position: { x: 0, y: 1050 }, data: { label: 'MySQL Migrate', sublabel: 'One-Shot Job', icon: 'terminal', color: '#06b6d4' } },
+  { id: 'grafana', type: 'custom', position: { x: 660, y: 1050 }, data: { label: 'Grafana', sublabel: 'Operations Dashboard', icon: 'activity', color: '#06b6d4' } },
+  { id: 'prometheus', type: 'custom', position: { x: 880, y: 1050 }, data: { label: 'Prometheus', sublabel: 'Metrics + Rules', icon: 'activity', color: '#06b6d4' } },
+  { id: 'alertmanager', type: 'custom', position: { x: 1100, y: 1050 }, data: { label: 'Alertmanager', sublabel: 'Operations Alerts', icon: 'bell', color: '#06b6d4' } },
 ];
 
 const defaultEdgeOptions = {
   animated: true,
   markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
   style: { strokeWidth: 2, stroke: '#94a3b8' },
-  labelStyle: { fill: '#fff', fontWeight: 600, fontSize: 11 },
-  labelBgStyle: { fill: '#1e293b', fillOpacity: 0.8 },
+  labelStyle: { fill: '#fff', fontWeight: 600, fontSize: 10 },
+  labelBgStyle: { fill: '#1e293b', fillOpacity: 0.85 },
 };
 
 const blueLine = { strokeWidth: 2, stroke: '#3b82f6' };
 const amberLine = { strokeWidth: 2, stroke: '#f59e0b' };
 const greenLine = { strokeWidth: 2, stroke: '#10b981' };
+const purpleLine = { strokeWidth: 2, stroke: '#8b5cf6' };
 const redLine = { strokeWidth: 2, stroke: '#ef4444' };
+const cyanLine = { strokeWidth: 2, stroke: '#06b6d4' };
 const dashedLine = { strokeDasharray: '5,5' };
 
 const initialEdges = [
-  // User -> Nginx
-  { id: 'e-user-nginx', source: 'user', target: 'nginx', label: 'HTTP', ...defaultEdgeOptions, style: greenLine },
-  
-  // Nginx -> Web
-  { id: 'e-nginx-web', source: 'nginx', target: 'web', label: 'proxy', ...defaultEdgeOptions, style: blueLine },
-  
-  // Web Layer
-  { id: 'e-web-authctx', source: 'web', target: 'auth_context', label: '', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  { id: 'e-web-api', source: 'web', target: 'api_client', label: 'requests', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  
-  { id: 'e-authctx-api', source: 'auth_context', target: 'api_client', label: 'auth state', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  { id: 'e-preview-api', source: 'file_preview', target: 'api_client', label: 'download', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  { id: 'e-share-api', source: 'share_ui', target: 'api_client', label: 'sharing', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
-  
-  { id: 'e-meta-notif', source: 'metadata', target: 'notifications', label: 'WebSocket push', ...defaultEdgeOptions, style: { ...blueLine, ...dashedLine }, type: 'smoothstep' },
-  
-  // API -> Services
-  { id: 'e-api-auth', source: 'api_client', target: 'auth', label: 'REST', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
-  { id: 'e-api-files', source: 'api_client', target: 'files', label: 'REST', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
-  { id: 'e-api-meta', source: 'api_client', target: 'metadata', label: 'REST', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
-  
-  // Services
-  { id: 'e-auth-mysql', source: 'auth', target: 'mysql', label: 'R/W', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-auth-redis', source: 'auth', target: 'redis', label: 'write/check revocation', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
-  
-  { id: 'e-files-mysql', source: 'files', target: 'mysql', label: 'R/W', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-files-minio', source: 'files', target: 'minio', label: 'stream objects', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-files-kafka', source: 'files', target: 'kafka', label: 'publish events', ...defaultEdgeOptions, type: 'smoothstep', style: { strokeWidth: 3, stroke: '#f59e0b' } },
-  { id: 'e-files-redis', source: 'files', target: 'redis', label: 'check revocation', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
-  
-  { id: 'e-meta-mysql', source: 'metadata', target: 'mysql', label: 'R/W', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-meta-es', source: 'metadata', target: 'elasticsearch', label: 'authenticated query', ...defaultEdgeOptions, type: 'smoothstep', style: amberLine },
-  { id: 'e-meta-redis', source: 'metadata', target: 'redis', label: 'JWT check + subscribe', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
-  
-  // Kafka -> Workers
+  // Entry boundaries
+  { id: 'e-user-nginx', source: 'user', target: 'nginx', label: 'UI / API / WS', ...defaultEdgeOptions, style: blueLine },
+  { id: 'e-clients-shared', source: 'project_clients', target: 'shared_network', label: 'cvp_ service token', ...defaultEdgeOptions, style: purpleLine },
+  { id: 'e-shared-nginx', source: 'shared_network', target: 'nginx', label: 'cloudvault-api', ...defaultEdgeOptions, style: purpleLine, type: 'smoothstep' },
+
+  // Frontend and gateway routing
+  { id: 'e-nginx-web', source: 'nginx', target: 'web', label: 'serve UI', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-web-projects', source: 'web', target: 'projects_ui', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-web-preview', source: 'web', target: 'file_preview', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-web-api', source: 'web', target: 'api_client', label: 'browser bundle', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-projects-api', source: 'projects_ui', target: 'api_client', label: 'project requests', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-preview-api', source: 'file_preview', target: 'api_client', label: 'preview / download', ...defaultEdgeOptions, style: blueLine, type: 'smoothstep' },
+  { id: 'e-api-nginx', source: 'api_client', target: 'nginx', label: 'same-origin REST', ...defaultEdgeOptions, style: { ...blueLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-nginx-auth', source: 'nginx', target: 'auth', label: 'auth / project access', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-nginx-files', source: 'nginx', target: 'files', label: 'file / folder routes', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-nginx-meta', source: 'nginx', target: 'metadata', label: 'metadata / search / WS', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-meta-notifications', source: 'metadata', target: 'notifications', label: 'WebSocket via gateway', ...defaultEdgeOptions, style: { ...blueLine, ...dashedLine }, type: 'smoothstep' },
+
+  // API data dependencies
+  { id: 'e-auth-mysql', source: 'auth', target: 'mysql', label: 'users / projects / audit', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-auth-redis', source: 'auth', target: 'redis', label: 'JWT revocation', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-files-mysql', source: 'files', target: 'mysql', label: 'metadata / quota', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-files-minio', source: 'files', target: 'minio', label: 'stream objects', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-files-kafka', source: 'files', target: 'kafka', label: 'publish events', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-files-redis', source: 'files', target: 'redis', label: 'JWT revocation', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-meta-mysql', source: 'metadata', target: 'mysql', label: 'metadata / activity', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-meta-es', source: 'metadata', target: 'elasticsearch', label: 'authenticated query', ...defaultEdgeOptions, style: amberLine, type: 'smoothstep' },
+  { id: 'e-meta-redis', source: 'metadata', target: 'redis', label: 'revocation + subscribe', ...defaultEdgeOptions, style: { ...amberLine, ...dashedLine }, type: 'smoothstep' },
+
+  // Event workers
   { id: 'e-kafka-audit', source: 'kafka', target: 'audit_worker', label: 'consume', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
   { id: 'e-kafka-zip', source: 'kafka', target: 'zip_worker', label: 'consume', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
-  { id: 'e-kafka-thumb', source: 'kafka', target: 'thumbnail_worker', label: 'consume', ...defaultEdgeOptions, style: redLine },
+  { id: 'e-kafka-thumb', source: 'kafka', target: 'thumbnail_worker', label: 'consume', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
   { id: 'e-kafka-search', source: 'kafka', target: 'search_worker', label: 'consume', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
-  { id: 'e-kafka-notify', source: 'kafka', target: 'notification_relay', label: 'consume events', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
-  
-  // Workers -> DBs
+  { id: 'e-kafka-relay', source: 'kafka', target: 'notification_relay', label: 'consume', ...defaultEdgeOptions, style: redLine, type: 'smoothstep' },
   { id: 'e-audit-mysql', source: 'audit_worker', target: 'mysql', label: 'write audit', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
-  
-  { id: 'e-zip-minio', source: 'zip_worker', target: 'minio', label: 'read/store', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-zip-mysql', source: 'zip_worker', target: 'mysql', label: 'records + quota', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
-  
-  { id: 'e-thumb-minio', source: 'thumbnail_worker', target: 'minio', label: 'read/store', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-zip-minio', source: 'zip_worker', target: 'minio', label: 'read / store', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-thumb-mysql', source: 'thumbnail_worker', target: 'mysql', label: 'update', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-thumb-minio', source: 'thumbnail_worker', target: 'minio', label: 'read / store', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-thumb-redis', source: 'thumbnail_worker', target: 'redis', label: 'notify', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
-  
   { id: 'e-search-minio', source: 'search_worker', target: 'minio', label: 'read content', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
-  { id: 'e-search-es', source: 'search_worker', target: 'elasticsearch', label: 'least-privilege index', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-search-es', source: 'search_worker', target: 'elasticsearch', label: 'index', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-search-redis', source: 'search_worker', target: 'redis', label: 'notify', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
-  { id: 'e-notify-redis', source: 'notification_relay', target: 'redis', label: 'publish activity', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-relay-redis', source: 'notification_relay', target: 'redis', label: 'publish activity', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
+
+  // Operations, migrations and observability
+  { id: 'e-migrate-mysql', source: 'mysql_migrate', target: 'mysql', label: 'migrations 002–008', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
+  { id: 'e-ops-mysql', source: 'project_ops', target: 'mysql', label: 'reconcile metadata', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-ops-minio', source: 'project_ops', target: 'minio', label: 'reconcile objects', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
+  { id: 'e-prom-ops', source: 'prometheus', target: 'project_ops', label: 'scrape :9100', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
+  { id: 'e-grafana-prom', source: 'grafana', target: 'prometheus', label: 'query metrics', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
+  { id: 'e-prom-alerts', source: 'prometheus', target: 'alertmanager', label: 'firing alerts', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
+  { id: 'e-auth-jaeger', source: 'auth', target: 'jaeger', label: 'OTLP traces', ...defaultEdgeOptions, style: { ...cyanLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-files-jaeger', source: 'files', target: 'jaeger', label: 'OTLP traces', ...defaultEdgeOptions, style: { ...cyanLine, ...dashedLine }, type: 'smoothstep' },
+  { id: 'e-meta-jaeger', source: 'metadata', target: 'jaeger', label: 'OTLP traces', ...defaultEdgeOptions, style: { ...cyanLine, ...dashedLine }, type: 'smoothstep' },
 ];
 
 export default function ArchitectureTab() {
@@ -276,45 +284,59 @@ export default function ArchitectureTab() {
 
   useEffect(() => {
     const checkHealth = async () => {
-      const targets = { auth: '/health/auth', files: '/health/file', metadata: '/health/metadata' };
-      const results = await Promise.all(Object.entries(targets).map(async ([id, url]) => {
-        try { const response = await fetch(url, { cache: 'no-store' }); return [id, response.ok ? 'healthy' : 'unhealthy']; }
-        catch { return [id, 'unhealthy']; }
-      }));
-      setNodes(current => current.map(node => {
+      const targets = {
+        auth: '/health/auth',
+        files: '/health/file',
+        metadata: '/health/metadata',
+      };
+      const results = await Promise.all(
+        Object.entries(targets).map(async ([id, url]) => {
+          try {
+            const response = await fetch(url, { cache: 'no-store' });
+            return [id, response.ok ? 'healthy' : 'unhealthy'];
+          } catch {
+            return [id, 'unhealthy'];
+          }
+        }),
+      );
+      setNodes((current) => current.map((node) => {
         const result = results.find(([id]) => id === node.id);
         return result ? { ...node, data: { ...node.data, health: result[1] } } : node;
       }));
       setLastChecked(new Date());
     };
+
     void checkHealth();
     const timer = window.setInterval(checkHealth, 30000);
     return () => window.clearInterval(timer);
   }, []);
 
   const onNodesChange = useCallback(
-    (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
-    []
+    (changes) => setNodes((current) => applyNodeChanges(changes, current)),
+    [],
   );
   const onEdgesChange = useCallback(
-    (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
-    []
+    (changes) => setEdges((current) => applyEdgeChanges(changes, current)),
+    [],
   );
 
   return (
     <div style={{ padding: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <div>
-          <h2 style={{ fontSize: '24px', margin: '0 0 8px 0', fontWeight: 'bold' }}>CloudVault Architecture</h2>
-          <p style={{ color: '#94a3b8', margin: 0 }}>
-            Live topology. <span style={{ color: '#38bdf8' }}>Click</span> a node to inspect its role. API health refreshes every 30 seconds.
-          </p>
-          <div style={{ display: 'flex', gap: '14px', marginTop: '10px', color: '#94a3b8', fontSize: '12px' }}><span>🟢 Live health</span><span>⚪ Documented component</span>{lastChecked && <span>Checked {lastChecked.toLocaleTimeString()}</span>}</div>
+      <div style={{ marginBottom: '20px' }}>
+        <h2 style={{ fontSize: '24px', margin: '0 0 8px', fontWeight: 'bold' }}>CloudVault Architecture</h2>
+        <p style={{ color: '#94a3b8', margin: 0 }}>
+          Personal and project storage topology. Click a node to inspect its role.
+        </p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '10px', color: '#94a3b8', fontSize: '12px' }}>
+          <span>🟢 Live API health</span>
+          <span>🔴 API health check failed</span>
+          <span>⚪ Documented component</span>
+          <span>Live probes cover Auth, File and Metadata APIs only.</span>
+          {lastChecked && <span>Checked {lastChecked.toLocaleTimeString()}</span>}
         </div>
       </div>
 
-      {/* React Flow Canvas container */}
-      <div style={{ height: '700px', width: '100%', background: '#0b0f19', borderRadius: '16px', border: '1px solid #1e293b', overflow: 'hidden' }}>
+      <div style={{ height: '760px', width: '100%', background: '#0b0f19', borderRadius: '16px', border: '1px solid #1e293b', overflow: 'hidden' }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -322,6 +344,8 @@ export default function ArchitectureTab() {
           onEdgesChange={onEdgesChange}
           nodeTypes={nodeTypes}
           fitView
+          fitViewOptions={{ padding: 0.12 }}
+          minZoom={0.25}
           attributionPosition="bottom-left"
           defaultEdgeOptions={defaultEdgeOptions}
         >
@@ -329,15 +353,14 @@ export default function ArchitectureTab() {
           <Controls style={{ background: '#1e293b', color: '#fff', fill: '#fff', border: '1px solid #334155' }} />
         </ReactFlow>
       </div>
-      
-      {/* CSS for pulse animation */}
-      <style dangerouslySetInnerHTML={{__html: `
+
+      <style dangerouslySetInnerHTML={{ __html: `
         @keyframes pulse {
           0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
           70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
           100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
         }
-      `}} />
+      ` }} />
     </div>
   );
 }
