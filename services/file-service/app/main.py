@@ -32,6 +32,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from minio import Minio
+from minio.commonconfig import CopySource
 from pydantic import BaseModel, Field
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Histogram
@@ -445,6 +446,45 @@ async def _release_project_reservation(
         await db.commit()
 
 
+async def _reserve_user_storage(
+    db: AsyncSession,
+    user_id: str,
+    requested_bytes: int,
+) -> User:
+    """Atomically reserve personal storage before writing an object."""
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_user = result.scalar_one()
+    if locked_user.storage_used + requested_bytes > locked_user.storage_quota:
+        await db.rollback()
+        raise HTTPException(status_code=413, detail="Storage quota exceeded")
+    locked_user.storage_used += requested_bytes
+    await db.commit()
+    return locked_user
+
+
+async def _release_user_reservation(
+    db: AsyncSession,
+    user_id: str,
+    reserved_bytes: int,
+) -> None:
+    """Compensate a committed personal-storage reservation after a failure."""
+    await db.rollback()
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_user = result.scalar_one()
+    locked_user.storage_used = max(0, locked_user.storage_used - reserved_bytes)
+    await db.commit()
+
+
 async def _reconcile_stale_project_uploads() -> None:
     stale_before = datetime.now(timezone.utc) - timedelta(minutes=30)
     async with async_session() as db:
@@ -454,22 +494,32 @@ async def _reconcile_stale_project_uploads() -> None:
                 ProjectUpload.updated_at < stale_before,
             ).limit(100)
         )
-        upload_ids = [item.id for item in result.scalars().all()]
+        upload_refs = [(item.id, item.project_id) for item in result.scalars().all()]
         await db.rollback()
 
-        for upload_id in upload_ids:
-            upload_result = await db.execute(
-                select(ProjectUpload).where(ProjectUpload.id == upload_id).with_for_update()
+        for upload_id, project_id in upload_refs:
+            # Keep the global lock order consistent with upload requests:
+            # project first, then its idempotency record.
+            project_result = await db.execute(
+                select(Project).where(Project.id == project_id).with_for_update()
             )
-            upload = upload_result.scalar_one_or_none()
-            if not upload or upload.status not in {"PENDING", "FAILED"}:
+            project = project_result.scalar_one_or_none()
+            if not project:
                 await db.rollback()
                 continue
-            if upload.status == "PENDING" and upload.reserved_bytes:
-                project_result = await db.execute(
-                    select(Project).where(Project.id == upload.project_id).with_for_update()
-                )
-                project = project_result.scalar_one()
+            upload_result = await db.execute(
+                select(ProjectUpload).where(
+                    ProjectUpload.id == upload_id,
+                    ProjectUpload.project_id == project_id,
+                    ProjectUpload.status.in_(["PENDING", "FAILED"]),
+                    ProjectUpload.updated_at < stale_before,
+                ).with_for_update()
+            )
+            upload = upload_result.scalar_one_or_none()
+            if not upload:
+                await db.rollback()
+                continue
+            if upload.reserved_bytes:
                 project.storage_used = max(0, project.storage_used - upload.reserved_bytes)
                 upload.reserved_bytes = 0
             object_key = upload.object_key
@@ -833,15 +883,40 @@ async def upload_project_file(
         raise _api_error(400, "INVALID_FILE", "Supplied checksum does not match file content")
     metadata["checksum_sha256"] = checksum
 
+    locked_result = await db.execute(
+        select(Project)
+        .where(Project.id == project.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_project = locked_result.scalar_one()
+    if locked_project.status != "active":
+        await db.rollback()
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    if file_size > locked_project.max_file_size:
+        await db.rollback()
+        raise _api_error(413, "FILE_TOO_LARGE", "File exceeds the project file-size limit")
+    locked_allowed_mime_types = (locked_project.retention_policy or {}).get("allowed_mime_types")
+    if (
+        isinstance(locked_allowed_mime_types, list)
+        and locked_allowed_mime_types
+        and content_type not in locked_allowed_mime_types
+    ):
+        await db.rollback()
+        raise _api_error(400, "INVALID_FILE", "File MIME type is not allowed by project policy")
+
+    # Lock the idempotency record only after the project. Every request and
+    # maintenance path follows this order to avoid deadlocks.
     existing_result = await db.execute(
         select(ProjectUpload).where(
-            ProjectUpload.project_id == project.id,
+            ProjectUpload.project_id == locked_project.id,
             ProjectUpload.idempotency_key == idempotency_key,
-        )
+        ).with_for_update()
     )
     upload = existing_result.scalar_one_or_none()
     if upload:
         if upload.checksum_sha256 != checksum:
+            await db.rollback()
             raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already exists for different content")
         if upload.status == "AVAILABLE" and upload.file_id:
             stored = await db.get(File, upload.file_id)
@@ -850,29 +925,30 @@ async def upload_project_file(
                 response["idempotent_replay"] = True
                 await db.commit()
                 return response
+            await db.rollback()
             raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotent upload result is no longer available")
         if upload.status == "PENDING":
+            await db.rollback()
             raise _api_error(409, "UPLOAD_IN_PROGRESS", "An upload with this idempotency key is in progress")
 
-    locked_result = await db.execute(
-        select(Project)
-        .where(Project.id == project.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    locked_project = locked_result.scalar_one()
     if upload and upload.status == "FAILED" and upload.reserved_bytes:
         locked_project.storage_used = max(0, locked_project.storage_used - upload.reserved_bytes)
         upload.reserved_bytes = 0
     if locked_project.storage_used + file_size > locked_project.storage_quota:
         PROJECT_QUOTA_REJECTIONS.labels(project=locked_project.slug).inc()
-        await _emit_event("QUOTA_EXCEEDED", {
+        quota_event = {
             "project_id": locked_project.id,
             "user_id": principal.user.id if principal.user else None,
             "service_account_id": principal.service_account.id if principal.service_account else None,
             "attempted_bytes": file_size,
             "storage_used": locked_project.storage_used,
             "storage_quota": locked_project.storage_quota,
+        }
+        # Persist cleanup of a legacy failed reservation before releasing the
+        # project lock. No external I/O happens while the row is locked.
+        await db.commit()
+        await _emit_event("QUOTA_EXCEEDED", {
+            **quota_event,
         })
         raise _api_error(413, "STORAGE_QUOTA_EXCEEDED", "Project storage quota exceeded")
 
@@ -1425,16 +1501,25 @@ async def permanently_delete_project_file(
         service_scope="files:delete",
         user_roles={"admin"},
     )
+    # Lock owner before file; retention and reconciliation use the same order.
+    project_result = await db.execute(
+        select(Project)
+        .where(Project.id == principal.project.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_project = project_result.scalar_one()
     result = await db.execute(
         select(File).where(
             File.id == file_id,
-            File.project_id == principal.project.id,
+            File.project_id == locked_project.id,
             File.status == "DELETED",
             File.is_deleted == True,
-        )
+        ).with_for_update()
     )
     stored = result.scalar_one_or_none()
     if not stored:
+        await db.rollback()
         raise _api_error(404, "FILE_NOT_FOUND", "Project file not found in trash")
 
     versions_result = await db.execute(
@@ -1454,12 +1539,9 @@ async def permanently_delete_project_file(
                 stored.thumbnail_key,
             )
     except Exception:
+        await db.rollback()
         raise _api_error(503, "STORAGE_UNAVAILABLE", "Object storage deletion failed; retry safely")
 
-    project_result = await db.execute(
-        select(Project).where(Project.id == principal.project.id).with_for_update()
-    )
-    locked_project = project_result.scalar_one()
     released_bytes = sum(stored_objects.values())
     original_name = stored.original_name
     locked_project.storage_used = max(0, locked_project.storage_used - released_bytes)
@@ -1480,8 +1562,6 @@ async def permanently_delete_project_file(
 # ══════════════════════════════════════════════
 # FILE UPLOAD / DOWNLOAD
 # ══════════════════════════════════════════════
-
-import io
 
 @app.get("/api/v1/files/project-starred")
 async def list_starred_project_files(
@@ -1535,19 +1615,42 @@ async def upload_file(
         file_size += len(chunk)
     await file.seek(0)
 
-    # Check storage quota
-    if user.storage_used + file_size > user.storage_quota:
-        raise HTTPException(status_code=413, detail="Storage quota exceeded")
+    original_name = os.path.basename(file.filename or "unnamed") or "unnamed"
+    if len(original_name) > 255:
+        raise HTTPException(status_code=400, detail="Filename exceeds 255 characters")
+    content_type = file.content_type or "application/octet-stream"
 
-    # Generate unique key
+    destination_folder = None
+    if folder_id:
+        folder_result = await db.execute(
+            select(Folder).where(
+                Folder.id == folder_id,
+                Folder.user_id == user.id,
+                Folder.is_deleted == False,
+            )
+        )
+        destination_folder = folder_result.scalar_one_or_none()
+        if not destination_folder:
+            raise HTTPException(status_code=404, detail="Destination folder not found")
+
+    relative_parts: list[str] = []
+    if relative_path and "/" in relative_path.replace("\\", "/"):
+        raw_parts = relative_path.replace("\\", "/").split("/")[:-1]
+        if any(part == ".." for part in raw_parts):
+            raise HTTPException(status_code=400, detail="Invalid relative path")
+        relative_parts = [part for part in raw_parts if part not in {"", "."}]
+        if any(len(part) > 255 for part in relative_parts):
+            raise HTTPException(status_code=400, detail="Folder name exceeds 255 characters")
+
+    # Reserve quota before external I/O. The row lock makes concurrent uploads
+    # observe each other's reservations instead of all passing a stale check.
+    await _reserve_user_storage(db, user.id, file_size)
+
     file_id = str(uuid.uuid4())
-    ext = file.filename.rsplit(".", 1)[-1] if "." in file.filename else ""
+    ext = original_name.rsplit(".", 1)[-1] if "." in original_name else ""
     minio_key = f"{user.id}/{file_id}{f'.{ext}' if ext else ''}"
-
-    # Compute checksum
     checksum = hasher.hexdigest()
 
-    # Upload to MinIO
     try:
         await asyncio.to_thread(
             minio_client.put_object,
@@ -1555,23 +1658,36 @@ async def upload_file(
             minio_key,
             file.file,
             file_size,
-            content_type=file.content_type or "application/octet-stream",
+            content_type=content_type,
         )
     except Exception as e:
+        await _release_user_reservation(db, user.id, file_size)
         raise HTTPException(status_code=500, detail=f"Upload to storage failed: {str(e)}")
 
-    # Handle folder from relative_path (e.g., drag-and-drop folder upload)
-    actual_folder_id = folder_id
-    if relative_path and "/" in relative_path:
-        # Create intermediate folders
-        parts = relative_path.split("/")[:-1]  # Exclude filename
+    try:
+        # Serialize metadata/version creation for this user after the object has
+        # been stored. Quota was already reserved and is not incremented again.
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        user_result.scalar_one()
+
+        actual_folder_id = folder_id
         parent_id = folder_id
-        for part_name in parts:
+        parent_path = destination_folder.path.rstrip("/") if destination_folder else ""
+        parent_depth = destination_folder.depth if destination_folder else -1
+        for part_name in relative_parts:
+            parent_condition = (
+                Folder.parent_id == parent_id if parent_id else Folder.parent_id.is_(None)
+            )
             existing = await db.execute(
                 select(Folder).where(
                     Folder.user_id == user.id,
                     Folder.name == part_name,
-                    Folder.parent_id == parent_id if parent_id else Folder.parent_id == None,
+                    parent_condition,
                     Folder.is_deleted == False,
                 )
             )
@@ -1581,73 +1697,74 @@ async def upload_file(
                     name=part_name,
                     parent_id=parent_id,
                     user_id=user.id,
-                    path=f"/{part_name}",
+                    path=f"{parent_path}/{part_name}",
+                    depth=parent_depth + 1,
                 )
                 db.add(folder)
                 await db.flush()
-                await db.refresh(folder)
             parent_id = folder.id
-        actual_folder_id = parent_id
+            parent_path = folder.path.rstrip("/")
+            parent_depth = folder.depth
+        if relative_parts:
+            actual_folder_id = parent_id
 
-    # Check if file with same original_name exists
-    original_name = file.filename or "unnamed"
-    if actual_folder_id:
-        existing_file_query = select(File).where(
-            File.user_id == user.id,
-            File.folder_id == actual_folder_id,
-            File.original_name == original_name,
-            File.is_deleted == False,
+        folder_condition = (
+            File.folder_id == actual_folder_id
+            if actual_folder_id
+            else File.folder_id.is_(None)
         )
-    else:
-        existing_file_query = select(File).where(
-            File.user_id == user.id,
-            File.folder_id == None,
-            File.original_name == original_name,
-            File.is_deleted == False,
+        existing = await db.execute(
+            select(File).where(
+                File.user_id == user.id,
+                folder_condition,
+                File.original_name == original_name,
+                File.is_deleted == False,
+            ).with_for_update()
         )
-    
-    existing = await db.execute(existing_file_query)
-    existing_file = existing.scalar_one_or_none()
+        existing_file = existing.scalar_one_or_none()
 
-    if existing_file:
-        existing_file.current_version += 1
-        existing_file.minio_key = minio_key
-        existing_file.size = file_size
-        existing_file.checksum_sha256 = checksum
-        existing_file.mime_type = file.content_type or "application/octet-stream"
-        db_file = existing_file
-        await db.flush()
-        await db.refresh(db_file)
-    else:
-        db_file = File(
-            filename=f"{file_id}{f'.{ext}' if ext else ''}",
-            original_name=original_name,
-            mime_type=file.content_type or "application/octet-stream",
-            size=file_size,
-            folder_id=actual_folder_id,
-            user_id=user.id,
-            minio_bucket=settings.MINIO_BUCKET_FILES,
+        if existing_file:
+            existing_file.current_version += 1
+            existing_file.minio_key = minio_key
+            existing_file.size = file_size
+            existing_file.checksum_sha256 = checksum
+            existing_file.mime_type = content_type
+            db_file = existing_file
+        else:
+            db_file = File(
+                filename=f"{file_id}{f'.{ext}' if ext else ''}",
+                original_name=original_name,
+                mime_type=content_type,
+                size=file_size,
+                folder_id=actual_folder_id,
+                user_id=user.id,
+                minio_bucket=settings.MINIO_BUCKET_FILES,
+                minio_key=minio_key,
+                checksum_sha256=checksum,
+            )
+            db.add(db_file)
+            await db.flush()
+
+        db.add(FileVersion(
+            file_id=db_file.id,
+            version_number=db_file.current_version,
             minio_key=minio_key,
+            size=file_size,
             checksum_sha256=checksum,
-        )
-        db.add(db_file)
-        await db.flush()
+            uploaded_by=user.id,
+        ))
+        await db.commit()
         await db.refresh(db_file)
-
-    # Create new version record
-    version = FileVersion(
-        file_id=db_file.id,
-        version_number=db_file.current_version,
-        minio_key=minio_key,
-        size=file_size,
-        checksum_sha256=checksum,
-        uploaded_by=user.id,
-    )
-    db.add(version)
-
-    # Update storage used (accumulate size of all versions)
-    user.storage_used += file_size
-    await db.commit()
+    except Exception:
+        await db.rollback()
+        with suppress(Exception):
+            await asyncio.to_thread(
+                minio_client.remove_object,
+                settings.MINIO_BUCKET_FILES,
+                minio_key,
+            )
+        await _release_user_reservation(db, user.id, file_size)
+        raise HTTPException(status_code=503, detail="File metadata could not be committed")
 
     # Emit Kafka event
     await _emit_event("FILE_UPLOADED", {
@@ -1892,11 +2009,23 @@ async def permanent_delete(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    user_result = await db.execute(
+        select(User)
+        .where(User.id == user.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_user = user_result.scalar_one()
     result = await db.execute(
-        select(File).where(File.id == file_id, File.user_id == user.id, File.is_deleted == True)
+        select(File).where(
+            File.id == file_id,
+            File.user_id == locked_user.id,
+            File.is_deleted == True,
+        ).with_for_update()
     )
     f = result.scalar_one_or_none()
     if not f:
+        await db.rollback()
         raise HTTPException(status_code=404, detail="File not found in trash")
 
     versions_result = await db.execute(
@@ -1920,10 +2049,16 @@ async def permanent_delete(
                 f.thumbnail_key,
             )
     except Exception:
-        pass
+        await db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Object storage deletion failed; retry safely",
+        )
 
-    # Update storage
-    user.storage_used = max(0, user.storage_used - sum(stored_objects.values()))
+    locked_user.storage_used = max(
+        0,
+        locked_user.storage_used - sum(stored_objects.values()),
+    )
 
     await db.delete(f)
     await db.commit()
@@ -1973,42 +2108,76 @@ async def copy_file(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Copy object in MinIO
+    destination_folder_id = body.get("folder_id") or f.folder_id
+    if destination_folder_id:
+        folder_result = await db.execute(
+            select(Folder).where(
+                Folder.id == destination_folder_id,
+                Folder.user_id == user.id,
+                Folder.is_deleted == False,
+            )
+        )
+        if not folder_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Destination folder not found")
+
+    await _reserve_user_storage(db, user.id, f.size)
+
     new_id = str(uuid.uuid4())
     ext = f.filename.rsplit(".", 1)[-1] if "." in f.filename else ""
     new_key = f"{user.id}/{new_id}{f'.{ext}' if ext else ''}"
 
-    import io
     try:
-        data = minio_client.get_object(f.minio_bucket, f.minio_key)
-        content = data.read()
-        data.close()
-        minio_client.put_object(
+        await asyncio.to_thread(
+            minio_client.copy_object,
             settings.MINIO_BUCKET_FILES,
             new_key,
-            io.BytesIO(content),
-            length=len(content),
-            content_type=f.mime_type,
+            CopySource(f.minio_bucket, f.minio_key),
         )
     except Exception as e:
+        await _release_user_reservation(db, user.id, f.size)
         raise HTTPException(status_code=500, detail=f"Failed to copy file: {str(e)}")
 
-    new_file = File(
-        filename=f"{new_id}{f'.{ext}' if ext else ''}",
-        original_name=f"Copy of {f.original_name}",
-        mime_type=f.mime_type,
-        size=f.size,
-        folder_id=body.get("folder_id") or f.folder_id,
-        user_id=user.id,
-        minio_bucket=settings.MINIO_BUCKET_FILES,
-        minio_key=new_key,
-        checksum_sha256=f.checksum_sha256,
-    )
-    db.add(new_file)
-
-    user.storage_used += f.size
-    await db.commit()
-    await db.refresh(new_file)
+    try:
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        user_result.scalar_one()
+        new_file = File(
+            filename=f"{new_id}{f'.{ext}' if ext else ''}",
+            original_name=f"Copy of {f.original_name}",
+            mime_type=f.mime_type,
+            size=f.size,
+            folder_id=destination_folder_id,
+            user_id=user.id,
+            minio_bucket=settings.MINIO_BUCKET_FILES,
+            minio_key=new_key,
+            checksum_sha256=f.checksum_sha256,
+        )
+        db.add(new_file)
+        await db.flush()
+        db.add(FileVersion(
+            file_id=new_file.id,
+            version_number=1,
+            minio_key=new_key,
+            size=f.size,
+            checksum_sha256=f.checksum_sha256,
+            uploaded_by=user.id,
+        ))
+        await db.commit()
+        await db.refresh(new_file)
+    except Exception:
+        await db.rollback()
+        with suppress(Exception):
+            await asyncio.to_thread(
+                minio_client.remove_object,
+                settings.MINIO_BUCKET_FILES,
+                new_key,
+            )
+        await _release_user_reservation(db, user.id, f.size)
+        raise HTTPException(status_code=503, detail="File metadata could not be committed")
 
     await _emit_event("FILE_COPIED", {
         "file_id": new_file.id, "source_id": f.id, "user_id": user.id,
