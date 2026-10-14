@@ -14,6 +14,7 @@ x-kafka-cluster-environment: &kafka-cluster-environment
   KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
   KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
 
 x-zookeeper-environment: &zookeeper-environment
   ZOOKEEPER_CLIENT_PORT: 2181
@@ -22,6 +23,7 @@ x-zookeeper-environment: &zookeeper-environment
   ZOOKEEPER_SYNC_LIMIT: 5
   ZOOKEEPER_SERVERS: zookeeper:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
   KAFKA_OPTS: -Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat,mntr
+  KAFKA_HEAP_OPTS: ${ZOOKEEPER_HEAP_OPTS:--Xms128m -Xmx256m}
 
 x-minio-environment: &minio-environment
   MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}

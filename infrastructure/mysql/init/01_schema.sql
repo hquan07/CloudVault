@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS shared_links (
 -- ============================================
 CREATE TABLE IF NOT EXISTS audit_logs (
     id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+    event_id CHAR(36),
     user_id CHAR(36),
     project_id CHAR(36),
     service_account_id CHAR(36),
@@ -347,12 +348,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     INDEX idx_audit_action (action),
     INDEX idx_audit_resource (resource_type, resource_id),
     INDEX idx_audit_created (created_at),
+    UNIQUE INDEX uq_audit_event (event_id),
     CONSTRAINT fk_audit_user FOREIGN KEY (user_id) 
         REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT fk_audit_project FOREIGN KEY (project_id)
         REFERENCES projects(id) ON DELETE SET NULL,
     CONSTRAINT fk_audit_service_account FOREIGN KEY (service_account_id)
         REFERENCES service_accounts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- WORKER EVENT IDEMPOTENCY TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS worker_processed_events (
+    consumer_group VARCHAR(100) NOT NULL,
+    event_id CHAR(36) NOT NULL,
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (consumer_group, event_id),
+    INDEX idx_worker_events_processed (processed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

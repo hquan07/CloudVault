@@ -19,9 +19,12 @@ Endpoints matching the frontend api.ts contract:
 """
 
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging
+import os
+import uuid
 
 import bcrypt
 from minio import Minio
@@ -60,12 +63,14 @@ minio_public_client = Minio(
 
 
 
-from aiokafka import AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from aiokafka.structs import TopicPartition
 from app.database import async_session
 import json
 import asyncio
 
 notification_consumer_task = None
+logger = logging.getLogger(__name__)
 
 async def notification_worker():
     """Forward domain events to Redis; audit persistence is owned by audit-logger."""
@@ -73,34 +78,92 @@ async def notification_worker():
         settings.KAFKA_TOPIC_FILE_EVENTS,
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
         group_id="metadata-notifications",
+        client_id=f"metadata-notifications-{os.getenv('HOSTNAME', 'local')}",
         auto_offset_reset="latest",
+        enable_auto_commit=False,
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     )
+    dlq = AIOKafkaProducer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        client_id=f"metadata-notifications-dlq-{os.getenv('HOSTNAME', 'local')}",
+        acks="all",
+        enable_idempotence=True,
+        key_serializer=lambda value: value.encode("utf-8"),
+        value_serializer=lambda value: json.dumps(value, default=str).encode("utf-8"),
+    )
     await consumer.start()
+    await dlq.start()
     try:
         async for msg in consumer:
             data = msg.value
-            event = data.get("event")
-            user_id = data.get("user_id") or data.get("shared_by")
-            if not event or not user_id:
-                continue
-
-            if redis_client:
-                msg_payload = {
-                    "type": "activity",
-                    "action": event,
-                    "resource_name": data.get("filename") or data.get("folder_name") or "",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                recipients = {user_id}
-                if data.get("shared_with"):
-                    recipients.add(data["shared_with"])
-                for recipient in recipients:
-                    await redis_client.publish(
-                        f"notifications:{recipient}", json.dumps(msg_payload)
+            event_id = str(
+                data.get("event_id")
+                or uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"kafka:{msg.topic}:{msg.partition}:{msg.offset}",
+                )
+            )
+            data.setdefault("event_id", event_id)
+            last_error = None
+            max_retries = max(1, int(os.getenv("KAFKA_CONSUMER_MAX_RETRIES", "3")))
+            backoff = max(
+                0.0, float(os.getenv("KAFKA_CONSUMER_RETRY_BACKOFF_SECONDS", "2"))
+            )
+            for attempt in range(1, max_retries + 1):
+                try:
+                    event = data.get("event")
+                    user_id = data.get("user_id") or data.get("shared_by")
+                    if event and user_id and redis_client:
+                        msg_payload = {
+                            "type": "activity",
+                            "action": event,
+                            "resource_name": data.get("filename") or data.get("folder_name") or "",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        recipients = {user_id}
+                        if data.get("shared_with"):
+                            recipients.add(data["shared_with"])
+                        for recipient in recipients:
+                            await redis_client.publish(
+                                f"notifications:{recipient}", json.dumps(msg_payload)
+                            )
+                    last_error = None
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - consumer boundary
+                    last_error = error
+                    logger.exception(
+                        "Notification event %s failed on attempt %s/%s",
+                        event_id,
+                        attempt,
+                        max_retries,
                     )
+                    if attempt < max_retries and backoff:
+                        await asyncio.sleep(backoff * attempt)
+
+            if last_error is not None:
+                await dlq.send_and_wait(
+                    settings.KAFKA_TOPIC_DEAD_LETTER,
+                    {
+                        "event_id": event_id,
+                        "event": "DEAD_LETTERED",
+                        "failed_consumer_group": "metadata-notifications",
+                        "source_topic": msg.topic,
+                        "source_partition": msg.partition,
+                        "source_offset": msg.offset,
+                        "error_type": type(last_error).__name__,
+                        "error": str(last_error)[:2000],
+                        "original_event": data,
+                    },
+                    key=event_id,
+                )
+            await consumer.commit(
+                {TopicPartition(msg.topic, msg.partition): msg.offset + 1}
+            )
     finally:
         await consumer.stop()
+        await dlq.stop()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -186,6 +249,8 @@ async def lifespan(app: FastAPI):
     await close_auth_dependencies()
     if notification_consumer_task:
         notification_consumer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await notification_consumer_task
 
 
 # ── FastAPI App ──

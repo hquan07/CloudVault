@@ -14,10 +14,11 @@ import uuid
 import zipfile
 import logging
 
-from aiokafka import AIOKafkaConsumer
 from minio import Minio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
+
+from common.reliable_kafka import build_consumer, consume_reliably
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [ZipExtractor] %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,146 +57,182 @@ async def main():
     engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    consumer = AIOKafkaConsumer(
-        KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        group_id="zip-extractor",
-        auto_offset_reset="earliest",
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    )
-    await consumer.start()
-    logger.info("Listening for zip file events...")
+    def download_zip(object_key: str):
+        response = minio_client.get_object(BUCKET_FILES, object_key)
+        archive = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
+        try:
+            while chunk := response.read(1024 * 1024):
+                archive.write(chunk)
+            archive.seek(0)
+            return archive
+        except Exception:
+            archive.close()
+            raise
+        finally:
+            response.close()
+            response.release_conn()
 
-    try:
-        async for msg in consumer:
-            data = msg.value
-            event = data.get("event")
-            if event != "FILE_UPLOADED":
-                continue
+    def put_object(object_key: str, contents: bytes, content_type: str) -> None:
+        minio_client.put_object(
+            BUCKET_FILES,
+            object_key,
+            io.BytesIO(contents),
+            length=len(contents),
+            content_type=content_type,
+        )
 
-            mime_type = data.get("mime_type", "")
-            if mime_type not in ZIP_MIMES:
-                continue
+    async def already_processed(event_id: str) -> bool:
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT 1 FROM worker_processed_events "
+                    "WHERE consumer_group = 'zip-extractor' AND event_id = :event_id"
+                ),
+                {"event_id": event_id},
+            )
+            return result.first() is not None
 
-            file_id = data.get("file_id")
-            minio_key = data.get("minio_key")
-            user_id = data.get("user_id")
-            if not file_id or not minio_key or not user_id:
-                continue
+    async def handle_event(data: dict) -> None:
+        if data.get("event") != "FILE_UPLOADED":
+            return
+        if data.get("mime_type", "") not in ZIP_MIMES:
+            return
+        # Project archives are stored as project artifacts; extraction currently
+        # belongs only to the personal-file workflow and its user quota.
+        if data.get("project_id"):
+            return
 
-            logger.info(f"Extracting zip: {file_id}")
+        file_id = data.get("file_id")
+        minio_key = data.get("minio_key")
+        user_id = data.get("user_id")
+        event_id = data["event_id"]
+        if not file_id or not minio_key or not user_id:
+            raise ValueError("ZIP upload event is missing file_id, minio_key, or user_id")
+        if await already_processed(event_id):
+            logger.info("Skipped duplicate ZIP event %s", event_id)
+            return
 
-            resp = None
-            try:
-                resp = minio_client.get_object(BUCKET_FILES, minio_key)
-                zip_file = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
-                while chunk := resp.read(1024 * 1024):
-                    zip_file.write(chunk)
-                zip_file.seek(0)
-            except Exception as e:
-                logger.error(f"Failed to fetch zip: {e}")
-                continue
-            finally:
-                if resp is not None:
-                    resp.close()
-                    resp.release_conn()
+        logger.info("Extracting zip %s for event %s", file_id, event_id)
+        zip_file = await asyncio.to_thread(download_zip, minio_key)
+        uploaded_keys: list[str] = []
+        try:
+            with zipfile.ZipFile(zip_file) as archive:
+                entries = [info for info in archive.infolist() if not info.is_dir()]
+                if len(entries) > MAX_ZIP_ENTRIES:
+                    raise ValueError(f"ZIP contains too many files ({len(entries)})")
 
-            uploaded_keys = []
-            try:
-                with zipfile.ZipFile(zip_file) as zf:
-                    entries = [info for info in zf.infolist() if not info.is_dir()]
-                    if len(entries) > MAX_ZIP_ENTRIES:
-                        raise ValueError(f"ZIP contains too many files ({len(entries)})")
+                total_size = sum(info.file_size for info in entries)
+                if total_size > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ValueError(f"ZIP expands beyond limit ({total_size} bytes)")
 
-                    total_size = sum(info.file_size for info in entries)
-                    if total_size > MAX_ZIP_UNCOMPRESSED_BYTES:
-                        raise ValueError(f"ZIP expands beyond limit ({total_size} bytes)")
+                for info in entries:
+                    if info.flag_bits & 0x1:
+                        raise ValueError("Encrypted ZIP entries are not supported")
+                    compressed_size = max(info.compress_size, 1)
+                    if (
+                        info.file_size > 10 * 1024 * 1024
+                        and info.file_size / compressed_size > MAX_ZIP_COMPRESSION_RATIO
+                    ):
+                        raise ValueError(f"Suspicious compression ratio: {info.filename}")
 
+                async with session_factory() as session:
+                    processed = await session.execute(
+                        text(
+                            "SELECT 1 FROM worker_processed_events "
+                            "WHERE consumer_group = 'zip-extractor' "
+                            "AND event_id = :event_id FOR UPDATE"
+                        ),
+                        {"event_id": event_id},
+                    )
+                    if processed.first() is not None:
+                        return
+
+                    quota_result = await session.execute(
+                        text(
+                            "SELECT storage_used, storage_quota FROM users "
+                            "WHERE id = :uid FOR UPDATE"
+                        ),
+                        {"uid": user_id},
+                    )
+                    quota = quota_result.first()
+                    if not quota:
+                        raise ValueError("ZIP owner no longer exists")
+                    if quota.storage_used + total_size > quota.storage_quota:
+                        raise ValueError("Extracted files would exceed storage quota")
+
+                    namespace = uuid.UUID(event_id)
                     for info in entries:
-                        if info.flag_bits & 0x1:
-                            raise ValueError("Encrypted ZIP entries are not supported")
-                        compressed_size = max(info.compress_size, 1)
-                        if (
-                            info.file_size > 10 * 1024 * 1024
-                            and info.file_size / compressed_size > MAX_ZIP_COMPRESSION_RATIO
-                        ):
-                            raise ValueError(f"Suspicious compression ratio: {info.filename}")
-
-                    async with session_factory() as session:
-                        quota_result = await session.execute(
-                            text(
-                                "SELECT storage_used, storage_quota FROM users "
-                                "WHERE id = :uid FOR UPDATE"
-                            ),
-                            {"uid": user_id},
+                        original_name = os.path.basename(info.filename)
+                        if not original_name:
+                            continue
+                        extracted = await asyncio.to_thread(archive.read, info)
+                        new_id = str(uuid.uuid5(namespace, info.filename))
+                        new_key = f"{user_id}/{new_id}"
+                        content_type = (
+                            mimetypes.guess_type(original_name)[0]
+                            or "application/octet-stream"
                         )
-                        quota = quota_result.first()
-                        if not quota:
-                            raise ValueError("ZIP owner no longer exists")
-                        if quota.storage_used + total_size > quota.storage_quota:
-                            raise ValueError("Extracted files would exceed storage quota")
-
-                        for info in entries:
-                            original_name = os.path.basename(info.filename)
-                            if not original_name:
-                                continue
-                            extracted = zf.read(info)
-                            new_id = str(uuid.uuid4())
-                            new_key = f"{user_id}/{new_id}"
-                            mime_type = mimetypes.guess_type(original_name)[0] or "application/octet-stream"
-                            minio_client.put_object(
-                                BUCKET_FILES,
-                                new_key,
-                                io.BytesIO(extracted),
-                                length=len(extracted),
-                                content_type=mime_type,
-                            )
-                            uploaded_keys.append(new_key)
-
-                            await session.execute(
-                                text("""
-                                    INSERT INTO files (id, filename, original_name, mime_type, size,
-                                        user_id, minio_bucket, minio_key)
-                                    VALUES (:id, :filename, :original_name, :mime_type, :size,
-                                        :user_id, :bucket, :key)
-                                """),
-                                {
-                                    "id": new_id,
-                                    "filename": new_id,
-                                    "original_name": original_name,
-                                    "mime_type": mime_type,
-                                    "size": len(extracted),
-                                    "user_id": user_id,
-                                    "bucket": BUCKET_FILES,
-                                    "key": new_key,
-                                },
-                            )
-
-                            logger.info(f"  Extracted: {info.filename} -> {new_id}")
+                        await asyncio.to_thread(
+                            put_object, new_key, extracted, content_type
+                        )
+                        uploaded_keys.append(new_key)
 
                         await session.execute(
-                            text(
-                                "UPDATE users SET storage_used = storage_used + :size "
-                                "WHERE id = :uid"
-                            ),
-                            {"size": total_size, "uid": user_id},
+                            text("""
+                                INSERT INTO files (id, filename, original_name, mime_type, size,
+                                    user_id, minio_bucket, minio_key)
+                                VALUES (:id, :filename, :original_name, :mime_type, :size,
+                                    :user_id, :bucket, :key)
+                            """),
+                            {
+                                "id": new_id,
+                                "filename": new_id,
+                                "original_name": original_name,
+                                "mime_type": content_type,
+                                "size": len(extracted),
+                                "user_id": user_id,
+                                "bucket": BUCKET_FILES,
+                                "key": new_key,
+                            },
                         )
-                        await session.commit()
+                        logger.info("Extracted %s -> %s", info.filename, new_id)
 
-            except zipfile.BadZipFile:
-                logger.error(f"Invalid zip file: {file_id}")
-            except Exception as e:
-                logger.error(f"Extraction failed: {e}")
-                for uploaded_key in uploaded_keys:
-                    try:
-                        minio_client.remove_object(BUCKET_FILES, uploaded_key)
-                    except Exception:
-                        logger.exception("Failed to clean up extracted object %s", uploaded_key)
-            finally:
-                zip_file.close()
+                    await session.execute(
+                        text(
+                            "UPDATE users SET storage_used = storage_used + :size "
+                            "WHERE id = :uid"
+                        ),
+                        {"size": total_size, "uid": user_id},
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO worker_processed_events "
+                            "(consumer_group, event_id) VALUES ('zip-extractor', :event_id)"
+                        ),
+                        {"event_id": event_id},
+                    )
+                    await session.commit()
+        except Exception:
+            for uploaded_key in uploaded_keys:
+                try:
+                    await asyncio.to_thread(
+                        minio_client.remove_object, BUCKET_FILES, uploaded_key
+                    )
+                except Exception:
+                    logger.exception("Failed to clean up extracted object %s", uploaded_key)
+            raise
+        finally:
+            zip_file.close()
 
+    consumer = build_consumer(KAFKA_TOPIC, group_id="zip-extractor")
+    try:
+        await consume_reliably(
+            consumer,
+            handle_event,
+            group_id="zip-extractor",
+            logger=logger,
+        )
     finally:
-        await consumer.stop()
         await engine.dispose()
 
 

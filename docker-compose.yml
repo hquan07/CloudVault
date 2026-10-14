@@ -420,12 +420,15 @@ services:
 
   # KAFKA WORKERS
   thumbnail-worker:
-    build: ./workers/thumbnail-worker
+    build:
+      context: .
+      dockerfile: workers/thumbnail-worker/Dockerfile
     container_name: cloudvault-thumbnail-worker
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/thumbnail-worker:/app
+      - ./workers/thumbnail-worker/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -437,12 +440,15 @@ services:
       - cloudvault-network
 
   search-indexer:
-    build: ./workers/search-indexer
+    build:
+      context: .
+      dockerfile: workers/search-indexer/Dockerfile
     container_name: cloudvault-search-indexer
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/search-indexer:/app
+      - ./workers/search-indexer/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -454,12 +460,15 @@ services:
       - cloudvault-network
 
   audit-logger:
-    build: ./workers/audit-logger
+    build:
+      context: .
+      dockerfile: workers/audit-logger/Dockerfile
     container_name: cloudvault-audit-logger
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/audit-logger:/app
+      - ./workers/audit-logger/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -490,10 +499,15 @@ services:
       - cloudvault-network
 
   zip-extractor-worker:
-    build: ./workers/zip-extractor-worker
+    build:
+      context: .
+      dockerfile: workers/zip-extractor-worker/Dockerfile
     container_name: cloudvault-zip-extractor
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - ./workers/zip-extractor-worker/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
