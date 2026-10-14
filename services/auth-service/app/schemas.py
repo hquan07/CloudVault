@@ -117,6 +117,12 @@ class ProjectMembershipResponse(BaseModel):
     created_at: datetime
 
 
+class ProjectMemberCandidateResponse(BaseModel):
+    id: str
+    username: str
+    email: str
+
+
 class ProjectResponse(BaseModel):
     id: str
     slug: str

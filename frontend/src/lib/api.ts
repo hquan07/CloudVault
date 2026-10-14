@@ -333,6 +333,27 @@ export interface ProjectMember {
   created_at: string;
 }
 
+export interface ProjectMemberCandidate {
+  id: string;
+  username: string;
+  email: string;
+}
+
+export interface ProjectUploadSession {
+  session_id: string;
+  project_id: string;
+  status: 'PENDING' | 'AVAILABLE' | 'FAILED';
+  original_name: string;
+  mime_type: string;
+  file_size: number;
+  folder_id: string | null;
+  part_size: number;
+  part_count: number;
+  expires_at: string;
+  file?: ProjectFile;
+  idempotent_replay?: boolean;
+}
+
 export interface ServiceAccount {
   id: string;
   project_id: string;
@@ -424,8 +445,8 @@ export const projectApi = {
     onProgress: (percent: number) => void,
     signal?: AbortSignal,
     folderId?: string | null,
+    idempotencyKey = crypto.randomUUID(),
   ) => {
-    const idempotencyKey = crypto.randomUUID();
     const uploadOnce = () => new Promise<ProjectFile>((resolve, reject) => {
       const formData = new FormData();
       formData.append('file', file, file.name);
@@ -461,6 +482,92 @@ export const projectApi = {
       if (error instanceof ApiError && error.status === 401 && await refreshAccessToken()) {
         return uploadOnce();
       }
+      throw error;
+    }
+  },
+
+  uploadMultipartWithProgress: async (
+    projectId: string,
+    file: File,
+    metadata: Record<string, unknown>,
+    onProgress: (percent: number) => void,
+    signal?: AbortSignal,
+    folderId?: string | null,
+    idempotencyKey = crypto.randomUUID(),
+  ) => {
+    const session = await request<ProjectUploadSession>(
+      `${FILE_BASE}/projects/${projectId}/upload-sessions`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({
+          original_name: file.name,
+          mime_type: file.type || 'application/octet-stream',
+          file_size: file.size,
+          folder_id: folderId || null,
+          metadata,
+        }),
+        signal,
+      },
+    );
+    if (session.file) return session.file;
+
+    const loadedByPart = new Map<number, number>();
+    const completedParts: { part_number: number; etag: string }[] = [];
+    const updateProgress = (partNumber: number, loaded: number) => {
+      loadedByPart.set(partNumber, loaded);
+      const totalLoaded = [...loadedByPart.values()].reduce((sum, value) => sum + value, 0);
+      onProgress(Math.min(99, Math.round((totalLoaded / file.size) * 100)));
+    };
+    const uploadPart = async (partNumber: number) => {
+      if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError');
+      const { url } = await request<{ url: string }>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}/parts/${partNumber}`,
+        { signal },
+      );
+      const start = (partNumber - 1) * session.part_size;
+      const chunk = file.slice(start, Math.min(start + session.part_size, file.size));
+      const etag = await new Promise<string>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url);
+        xhr.upload.onprogress = (event) => updateProgress(partNumber, event.loaded);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const value = xhr.getResponseHeader('ETag');
+            if (value) resolve(value.replaceAll('"', ''));
+            else reject(new ApiError('Object storage did not return a part ETag', xhr.status));
+          } else reject(new ApiError('Object storage rejected an upload part', xhr.status));
+        };
+        xhr.onerror = () => reject(new ApiError('Network error during multipart upload', 0));
+        xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'));
+        signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+        xhr.send(chunk);
+      });
+      updateProgress(partNumber, chunk.size);
+      completedParts.push({ part_number: partNumber, etag });
+    };
+
+    try {
+      let nextPart = 1;
+      const workers = Array.from({ length: Math.min(3, session.part_count) }, async () => {
+        while (nextPart <= session.part_count) {
+          const partNumber = nextPart++;
+          await uploadPart(partNumber);
+        }
+      });
+      await Promise.all(workers);
+      completedParts.sort((a, b) => a.part_number - b.part_number);
+      const completed = await request<ProjectFile>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}/complete`,
+        { method: 'POST', body: JSON.stringify({ parts: completedParts }), signal },
+      );
+      onProgress(100);
+      return completed;
+    } catch (error) {
+      await request<void>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}`,
+        { method: 'DELETE' },
+      ).catch(() => undefined);
       throw error;
     }
   },
@@ -547,6 +654,11 @@ export const projectApi = {
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),
 
+  searchMemberCandidates: (projectId: string, query: string) =>
+    request<ProjectMemberCandidate[]>(
+      `${AUTH_BASE}/projects/${projectId}/member-candidates?q=${encodeURIComponent(query)}`,
+    ),
+
   addMember: (projectId: string, userId: string, role: ProjectMember['role']) =>
     request<ProjectMember>(`${AUTH_BASE}/projects/${projectId}/members`, {
       method: 'POST', body: JSON.stringify({ user_id: userId, role }),
@@ -563,7 +675,7 @@ export const projectApi = {
   listServiceAccounts: (projectId: string) =>
     request<ServiceAccount[]>(`${AUTH_BASE}/projects/${projectId}/service-accounts`),
 
-  createServiceAccount: (projectId: string, data: { name: string; scopes: string[] }) =>
+  createServiceAccount: (projectId: string, data: { name: string; scopes: string[]; expires_at?: string }) =>
     request<ServiceAccount>(`${AUTH_BASE}/projects/${projectId}/service-accounts`, {
       method: 'POST', body: JSON.stringify(data),
     }),
@@ -608,6 +720,7 @@ export const metaApi = {
     minSize?: number; maxSize?: number; dateFrom?: string; dateTo?: string;
     sortBy?: 'relevance' | 'created_at' | 'updated_at' | 'size' | 'original_name';
     sortOrder?: 'asc' | 'desc';
+    projectId?: string;
   }) => {
     const qs = new URLSearchParams();
     qs.set('q', params.q);
@@ -620,6 +733,7 @@ export const metaApi = {
     if (params.dateTo) qs.set('date_to', params.dateTo);
     if (params.sortBy) qs.set('sort_by', params.sortBy);
     if (params.sortOrder) qs.set('sort_order', params.sortOrder);
+    if (params.projectId) qs.set('project_id', params.projectId);
     return request(`${META_BASE}/search/?${qs.toString()}`);
   },
 

@@ -15,7 +15,7 @@ import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Response, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import delete, select, func, update
@@ -35,7 +35,7 @@ from app.schemas import (
     MessageResponse, UserResponse, TokenPair,
     AdminStatsResponse, ProjectCreateRequest, ProjectDeleteRequest, ProjectUpdateRequest,
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
-    ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
+    ProjectMemberCandidateResponse, ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
     ServiceAccountCreateRequest, ServiceAccountResponse, ServiceAccountIssuedResponse,
 )
 from app.auth import (
@@ -807,6 +807,39 @@ async def add_project_member(
         role=membership.role, username=member.username, email=member.email,
         created_at=membership.created_at,
     )
+
+
+@app.get(
+    "/api/v1/projects/{project_id}/member-candidates",
+    response_model=List[ProjectMemberCandidateResponse],
+)
+async def search_project_member_candidates(
+    project_id: str,
+    q: str = Query(..., min_length=2, max_length=100),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    normalized = q.strip()
+    if len(normalized) < 2:
+        raise HTTPException(status_code=400, detail="Search requires at least 2 characters")
+    existing_members = select(ProjectMembership.user_id).where(
+        ProjectMembership.project_id == project.id,
+    )
+    result = await db.execute(
+        select(User)
+        .where(
+            User.is_active == True,
+            ~User.id.in_(existing_members),
+            (User.email.ilike(f"%{normalized}%")) | (User.username.ilike(f"%{normalized}%")),
+        )
+        .order_by(User.username.asc())
+        .limit(20)
+    )
+    return [
+        ProjectMemberCandidateResponse(id=candidate.id, username=candidate.username, email=candidate.email)
+        for candidate in result.scalars().all()
+    ]
 
 
 @app.put(
