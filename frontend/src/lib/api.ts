@@ -242,6 +242,7 @@ export interface Project {
   warning_percent: number;
   retention_policy: Record<string, unknown> | null;
   member_role: 'viewer' | 'editor' | 'admin' | null;
+  is_pinned: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -328,6 +329,12 @@ export const projectApi = {
     request<void>(`${AUTH_BASE}/projects/${projectId}`, {
       method: 'DELETE', body: JSON.stringify({ confirm_slug: confirmSlug }),
     }),
+
+  pin: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/pin`, { method: 'POST' }),
+
+  unpin: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/pin`, { method: 'DELETE' }),
 
   getUsage: (projectId: string) =>
     request<ProjectUsage>(`${FILE_BASE}/projects/${projectId}/usage`),

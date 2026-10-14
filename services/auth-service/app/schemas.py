@@ -129,6 +129,7 @@ class ProjectResponse(BaseModel):
     warning_percent: int
     retention_policy: Optional[dict[str, Any]] = None
     member_role: Optional[str] = None
+    is_pinned: bool = False
     created_by: str
     created_at: datetime
     updated_at: datetime

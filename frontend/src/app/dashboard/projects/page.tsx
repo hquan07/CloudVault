@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { AlertCircle, ArrowRight, FolderKanban, HardDrive, Loader2, Plus, X } from 'lucide-react';
+import { AlertCircle, ArrowRight, FolderKanban, HardDrive, Loader2, Plus, Star, X } from 'lucide-react';
 import { ApiError, Project, projectApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { formatBytes } from '@/lib/utils';
@@ -55,12 +55,28 @@ export default function ProjectsPage() {
         warning_percent: Number(form.get('warning_percent')),
         retention_policy: { default_days: Number(form.get('retention_days')) },
       });
-      setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name)));
+      setProjects((current) => [...current, project].sort(
+        (a, b) => Number(b.is_pinned) - Number(a.is_pinned) || a.name.localeCompare(b.name),
+      ));
       setShowCreate(false);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const togglePin = async (project: Project) => {
+    setError('');
+    try {
+      const updated = project.is_pinned
+        ? await projectApi.unpin(project.id)
+        : await projectApi.pin(project.id);
+      setProjects((current) => current
+        .map((item) => item.id === project.id ? updated : item)
+        .sort((a, b) => Number(b.is_pinned) - Number(a.is_pinned) || a.name.localeCompare(b.name)));
+    } catch (err) {
+      setError(errorMessage(err));
     }
   };
 
@@ -105,29 +121,34 @@ export default function ProjectsPage() {
             const percent = project.storage_quota ? Math.min(100, project.storage_used / project.storage_quota * 100) : 0;
             const warning = percent >= project.warning_percent;
             return (
-              <Link key={project.id} href={`/dashboard/projects/${project.id}`} className="group rounded-2xl border border-gray-800 bg-gray-900 p-6 transition hover:-translate-y-0.5 hover:border-cyan-500/40">
+              <div key={project.id} className="group rounded-2xl border border-gray-800 bg-gray-900 p-6 transition hover:-translate-y-0.5 hover:border-cyan-500/40">
                 <div className="flex items-start justify-between gap-4">
-                  <div>
+                  <Link href={`/dashboard/projects/${project.id}`} className="min-w-0">
                     <h2 className="text-lg font-semibold text-white group-hover:text-cyan-300">{project.name}</h2>
                     <p className="mt-1 font-mono text-xs text-gray-500">{project.slug}</p>
-                  </div>
-                  <span className="rounded-full border border-gray-700 px-2.5 py-1 text-xs capitalize text-gray-300">{project.member_role}</span>
-                </div>
-                <p className="mt-4 line-clamp-2 min-h-10 text-sm text-gray-400">{project.description || 'No description provided.'}</p>
-                <div className="mt-6">
-                  <div className="mb-2 flex justify-between text-xs text-gray-400">
-                    <span className="inline-flex items-center gap-1"><HardDrive size={13} /> {formatBytes(project.storage_used)}</span>
-                    <span>{formatBytes(project.storage_quota)}</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-gray-800">
-                    <div className={`h-full rounded-full ${warning ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${percent}%` }} />
+                  </Link>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => void togglePin(project)} title={project.is_pinned ? 'Unpin project' : 'Pin project'} className={`rounded-lg p-2 hover:bg-yellow-500/10 hover:text-yellow-300 ${project.is_pinned ? 'text-yellow-400' : 'text-gray-500'}`}><Star size={17} className={project.is_pinned ? 'fill-current' : ''} /></button>
+                    <span className="rounded-full border border-gray-700 px-2.5 py-1 text-xs capitalize text-gray-300">{project.member_role}</span>
                   </div>
                 </div>
-                <div className="mt-5 flex items-center justify-between text-xs text-gray-500">
-                  <span className="capitalize">{project.status}</span>
-                  <span className="inline-flex items-center gap-1 text-cyan-400">Open <ArrowRight size={14} /></span>
-                </div>
-              </Link>
+                <Link href={`/dashboard/projects/${project.id}`} className="block">
+                  <p className="mt-4 line-clamp-2 min-h-10 text-sm text-gray-400">{project.description || 'No description provided.'}</p>
+                  <div className="mt-6">
+                    <div className="mb-2 flex justify-between text-xs text-gray-400">
+                      <span className="inline-flex items-center gap-1"><HardDrive size={13} /> {formatBytes(project.storage_used)}</span>
+                      <span>{formatBytes(project.storage_quota)}</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-gray-800">
+                      <div className={`h-full rounded-full ${warning ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${percent}%` }} />
+                    </div>
+                  </div>
+                  <div className="mt-5 flex items-center justify-between text-xs text-gray-500">
+                    <span className="capitalize">{project.status}</span>
+                    <span className="inline-flex items-center gap-1 text-cyan-400">Open <ArrowRight size={14} /></span>
+                  </div>
+                </Link>
+              </div>
             );
           })}
         </div>

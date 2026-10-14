@@ -26,7 +26,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import (
-    User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ServiceAccount,
+    User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ProjectPin, ServiceAccount,
 )
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
@@ -434,7 +434,11 @@ PROJECT_STATUSES = {"active", "suspended", "archived"}
 SERVICE_ACCOUNT_SCOPES = {"files:create", "files:read", "files:delete", "project:usage:read"}
 
 
-def _project_response(project: Project, member_role: str | None = None) -> ProjectResponse:
+def _project_response(
+    project: Project,
+    member_role: str | None = None,
+    is_pinned: bool = False,
+) -> ProjectResponse:
     return ProjectResponse(
         id=project.id,
         slug=project.slug,
@@ -447,6 +451,7 @@ def _project_response(project: Project, member_role: str | None = None) -> Proje
         warning_percent=project.warning_percent,
         retention_policy=project.retention_policy,
         member_role=member_role,
+        is_pinned=is_pinned,
         created_by=project.created_by,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -480,22 +485,43 @@ async def _project_membership(
     return project, membership
 
 
+async def _project_is_pinned(db: AsyncSession, user_id: str, project_id: str) -> bool:
+    return await db.get(ProjectPin, (user_id, project_id)) is not None
+
+
 @app.get("/api/v1/projects", response_model=List[ProjectResponse])
 async def list_projects(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user.role == "admin":
-        result = await db.execute(select(Project).order_by(Project.name.asc()))
-        return [_project_response(project, "admin") for project in result.scalars().all()]
+        result = await db.execute(
+            select(Project, ProjectPin.project_id)
+            .outerjoin(
+                ProjectPin,
+                (ProjectPin.project_id == Project.id) & (ProjectPin.user_id == user.id),
+            )
+            .order_by(ProjectPin.project_id.is_(None), Project.name.asc())
+        )
+        return [
+            _project_response(project, "admin", pin_project_id is not None)
+            for project, pin_project_id in result.all()
+        ]
 
     result = await db.execute(
-        select(Project, ProjectMembership.role)
+        select(Project, ProjectMembership.role, ProjectPin.project_id)
         .join(ProjectMembership, ProjectMembership.project_id == Project.id)
+        .outerjoin(
+            ProjectPin,
+            (ProjectPin.project_id == Project.id) & (ProjectPin.user_id == user.id),
+        )
         .where(ProjectMembership.user_id == user.id)
-        .order_by(Project.name.asc())
+        .order_by(ProjectPin.project_id.is_(None), Project.name.asc())
     )
-    return [_project_response(project, role) for project, role in result.all()]
+    return [
+        _project_response(project, role, pin_project_id is not None)
+        for project, role, pin_project_id in result.all()
+    ]
 
 
 @app.post("/api/v1/projects", response_model=ProjectResponse, status_code=201)
@@ -533,7 +559,47 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
 ):
     project, membership = await _project_membership(db, project_id, user)
-    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        await _project_is_pinned(db, user.id, project.id),
+    )
+
+
+@app.post("/api/v1/projects/{project_id}/pin", response_model=ProjectResponse)
+async def pin_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user)
+    existing = await db.get(ProjectPin, (user.id, project.id))
+    if not existing:
+        db.add(ProjectPin(user_id=user.id, project_id=project.id))
+        await db.commit()
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        True,
+    )
+
+
+@app.delete("/api/v1/projects/{project_id}/pin", response_model=ProjectResponse)
+async def unpin_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user)
+    existing = await db.get(ProjectPin, (user.id, project.id))
+    if existing:
+        await db.delete(existing)
+        await db.commit()
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        False,
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/usage", response_model=ProjectUsageResponse)
@@ -577,7 +643,11 @@ async def update_project(
         setattr(project, key, value)
     await db.commit()
     await db.refresh(project)
-    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        await _project_is_pinned(db, user.id, project.id),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/archive", response_model=ProjectResponse)
@@ -597,7 +667,11 @@ async def archive_project(
         )
         await db.commit()
         await db.refresh(project)
-    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        await _project_is_pinned(db, user.id, project.id),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/restore", response_model=ProjectResponse)
@@ -612,7 +686,11 @@ async def restore_project(
     project.status = "active"
     await db.commit()
     await db.refresh(project)
-    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        await _project_is_pinned(db, user.id, project.id),
+    )
 
 
 @app.delete("/api/v1/projects/{project_id}", status_code=204)

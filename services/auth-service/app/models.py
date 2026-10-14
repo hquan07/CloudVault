@@ -104,6 +104,14 @@ class ProjectMembership(Base):
     user = relationship("User")
 
 
+class ProjectPin(Base):
+    __tablename__ = "project_pins"
+
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class ServiceAccount(Base):
     __tablename__ = "service_accounts"
 
