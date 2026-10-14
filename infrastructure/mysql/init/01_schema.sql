@@ -247,6 +247,15 @@ CREATE TABLE IF NOT EXISTS project_uploads (
     idempotency_key VARCHAR(255) NOT NULL,
     checksum_sha256 CHAR(64) NOT NULL,
     object_key VARCHAR(1024),
+    multipart_upload_id VARCHAR(255),
+    upload_kind VARCHAR(20) NOT NULL DEFAULT 'proxy',
+    original_name VARCHAR(255),
+    mime_type VARCHAR(255),
+    file_size BIGINT,
+    folder_id CHAR(36),
+    metadata_json JSON,
+    part_size BIGINT,
+    part_count INT,
     reserved_bytes BIGINT NOT NULL DEFAULT 0,
     status ENUM('PENDING', 'AVAILABLE', 'FAILED') NOT NULL DEFAULT 'PENDING',
     error_code VARCHAR(64),
@@ -262,6 +271,8 @@ CREATE TABLE IF NOT EXISTS project_uploads (
         REFERENCES service_accounts(id) ON DELETE SET NULL,
     CONSTRAINT fk_project_uploads_user FOREIGN KEY (user_id)
         REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_project_uploads_folder FOREIGN KEY (folder_id)
+        REFERENCES folders(id) ON DELETE SET NULL,
     CONSTRAINT fk_project_uploads_file FOREIGN KEY (file_id)
         REFERENCES files(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

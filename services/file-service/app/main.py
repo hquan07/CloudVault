@@ -33,10 +33,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from minio import Minio
 from minio.commonconfig import CopySource
+from minio.datatypes import Part
 from pydantic import BaseModel, Field
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Histogram
-from sqlalchemy import select, func
+from sqlalchemy import and_, or_, select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -309,6 +310,24 @@ class ProjectFileMoveRequest(BaseModel):
     folder_id: str | None = None
 
 
+class ProjectUploadSessionRequest(BaseModel):
+    original_name: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field(default="application/octet-stream", min_length=1, max_length=255)
+    file_size: int = Field(..., gt=0)
+    folder_id: str | None = None
+    metadata: dict
+    checksum_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+
+
+class ProjectUploadPart(BaseModel):
+    part_number: int = Field(..., ge=1, le=10000)
+    etag: str = Field(..., min_length=1, max_length=255)
+
+
+class ProjectUploadCompleteRequest(BaseModel):
+    parts: list[ProjectUploadPart] = Field(..., min_length=1, max_length=10000)
+
+
 async def _resolve_project_principal(
     project_id: str,
     authorization: str | None,
@@ -423,6 +442,53 @@ def _project_retention_until(project: Project, metadata: dict) -> datetime | Non
     return None
 
 
+def _validate_project_upload_metadata(project: Project, metadata: dict, mime_type: str) -> None:
+    if len(json.dumps(metadata, separators=(",", ":")).encode("utf-8")) > 16384:
+        raise _api_error(400, "INVALID_FILE", "metadata exceeds 16 KiB")
+    required = {"artifact_type", "logical_date", "source_run_id", "retention_class"}
+    if not required.issubset(metadata):
+        raise _api_error(400, "INVALID_FILE", "Required metadata fields are missing")
+    allowed = (project.retention_policy or {}).get("allowed_mime_types")
+    if isinstance(allowed, list) and allowed and mime_type not in allowed:
+        raise _api_error(400, "INVALID_FILE", "File MIME type is not allowed by project policy")
+
+
+def _upload_session_to_dict(upload: ProjectUpload, *, file: File | None = None) -> dict:
+    response = {
+        "session_id": upload.id,
+        "project_id": upload.project_id,
+        "status": upload.status,
+        "original_name": upload.original_name,
+        "mime_type": upload.mime_type,
+        "file_size": upload.file_size,
+        "folder_id": upload.folder_id,
+        "part_size": upload.part_size,
+        "part_count": upload.part_count,
+        "expires_at": upload.expires_at.isoformat() if upload.expires_at else None,
+    }
+    if file:
+        response["file"] = _project_file_to_dict(file)
+    return response
+
+
+def _hash_minio_object(object_key: str) -> str:
+    response = minio_client.get_object(settings.MINIO_BUCKET_FILES, object_key)
+    hasher = hashlib.sha256()
+    try:
+        while chunk := response.read(1024 * 1024):
+            hasher.update(chunk)
+    finally:
+        response.close()
+        response.release_conn()
+    return hasher.hexdigest()
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
 async def _release_project_reservation(
     db: AsyncSession,
     project_id: str,
@@ -487,12 +553,27 @@ async def _release_user_reservation(
 
 async def _reconcile_stale_project_uploads() -> None:
     stale_before = datetime.now(timezone.utc) - timedelta(minutes=30)
+    now = datetime.now(timezone.utc)
+    stale_condition = or_(
+        and_(ProjectUpload.status == "FAILED", ProjectUpload.updated_at < stale_before),
+        and_(
+            ProjectUpload.status == "PENDING",
+            or_(
+                and_(
+                    ProjectUpload.upload_kind == "multipart",
+                    ProjectUpload.expires_at.is_not(None),
+                    ProjectUpload.expires_at < now,
+                ),
+                and_(
+                    ProjectUpload.upload_kind != "multipart",
+                    ProjectUpload.updated_at < stale_before,
+                ),
+            ),
+        ),
+    )
     async with async_session() as db:
         result = await db.execute(
-            select(ProjectUpload).where(
-                ProjectUpload.status.in_(["PENDING", "FAILED"]),
-                ProjectUpload.updated_at < stale_before,
-            ).limit(100)
+            select(ProjectUpload).where(stale_condition).limit(100)
         )
         upload_refs = [(item.id, item.project_id) for item in result.scalars().all()]
         await db.rollback()
@@ -511,8 +592,7 @@ async def _reconcile_stale_project_uploads() -> None:
                 select(ProjectUpload).where(
                     ProjectUpload.id == upload_id,
                     ProjectUpload.project_id == project_id,
-                    ProjectUpload.status.in_(["PENDING", "FAILED"]),
-                    ProjectUpload.updated_at < stale_before,
+                    stale_condition,
                 ).with_for_update()
             )
             upload = upload_result.scalar_one_or_none()
@@ -523,10 +603,22 @@ async def _reconcile_stale_project_uploads() -> None:
                 project.storage_used = max(0, project.storage_used - upload.reserved_bytes)
                 upload.reserved_bytes = 0
             object_key = upload.object_key
+            multipart_upload_id = upload.multipart_upload_id
             upload.object_key = None
+            upload.multipart_upload_id = None
             upload.status = "FAILED"
             upload.error_code = upload.error_code or "STALE_UPLOAD"
             await db.commit()
+            if object_key and multipart_upload_id:
+                try:
+                    await asyncio.to_thread(
+                        minio_client._abort_multipart_upload,
+                        settings.MINIO_BUCKET_FILES,
+                        object_key,
+                        multipart_upload_id,
+                    )
+                except Exception:
+                    pass
             if object_key:
                 try:
                     await asyncio.to_thread(
@@ -828,6 +920,475 @@ async def list_project_files(
     }
 
 
+@app.post("/api/v1/projects/{project_id}/upload-sessions", status_code=201)
+async def create_project_upload_session(
+    project_id: str,
+    payload: ProjectUploadSessionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    project = principal.project
+    if project.status != "active":
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    if not idempotency_key or len(idempotency_key) > 255:
+        raise _api_error(400, "INVALID_FILE", "Idempotency-Key is required and must be at most 255 characters")
+
+    original_name = os.path.basename(payload.original_name) or "unnamed"
+    if original_name != payload.original_name:
+        raise _api_error(400, "INVALID_FILE", "Filename must not contain a path")
+    if payload.file_size > project.max_file_size:
+        raise _api_error(413, "FILE_TOO_LARGE", "File exceeds the project file-size limit")
+    _validate_project_upload_metadata(project, payload.metadata, payload.mime_type)
+    destination_folder = None
+    if payload.folder_id:
+        destination_folder = await _get_project_folder(db, project.id, payload.folder_id)
+
+    part_size = max(5 * 1024 * 1024, settings.PROJECT_MULTIPART_PART_SIZE)
+    part_count = (payload.file_size + part_size - 1) // part_size
+    if part_count > 10000:
+        raise _api_error(413, "FILE_TOO_LARGE", "File requires more than 10,000 upload parts")
+    expected_checksum = payload.checksum_sha256.lower() if payload.checksum_sha256 else "0" * 64
+
+    locked_result = await db.execute(
+        select(Project)
+        .where(Project.id == project.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_project = locked_result.scalar_one()
+    if locked_project.status != "active":
+        await db.rollback()
+        raise _api_error(403, "PROJECT_ACCESS_DENIED", "Project is not active")
+    if payload.file_size > locked_project.max_file_size:
+        await db.rollback()
+        raise _api_error(413, "FILE_TOO_LARGE", "File exceeds the project file-size limit")
+    _validate_project_upload_metadata(locked_project, payload.metadata, payload.mime_type)
+
+    existing_result = await db.execute(
+        select(ProjectUpload).where(
+            ProjectUpload.project_id == locked_project.id,
+            ProjectUpload.idempotency_key == idempotency_key,
+        ).with_for_update()
+    )
+    upload = existing_result.scalar_one_or_none()
+    if upload:
+        same_request = (
+            upload.upload_kind == "multipart"
+            and upload.original_name == original_name
+            and upload.mime_type == payload.mime_type
+            and upload.file_size == payload.file_size
+            and upload.folder_id == (destination_folder.id if destination_folder else None)
+            and (upload.metadata_json or {}) == payload.metadata
+            and upload.checksum_sha256 == expected_checksum
+        )
+        if not same_request:
+            await db.rollback()
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already exists for a different upload")
+        if upload.status == "AVAILABLE" and upload.file_id:
+            stored = await db.get(File, upload.file_id)
+            response = _upload_session_to_dict(upload, file=stored)
+            response["idempotent_replay"] = True
+            await db.commit()
+            return response
+        if upload.status == "PENDING":
+            expires_at = _as_utc(upload.expires_at)
+            if not expires_at or expires_at > datetime.now(timezone.utc):
+                response = _upload_session_to_dict(upload)
+                response["idempotent_replay"] = True
+                await db.commit()
+                return response
+            upload.status = "FAILED"
+            upload.error_code = "UPLOAD_EXPIRED"
+
+    stale_object_key = upload.object_key if upload else None
+    stale_multipart_id = upload.multipart_upload_id if upload else None
+    if upload and upload.reserved_bytes:
+        locked_project.storage_used = max(0, locked_project.storage_used - upload.reserved_bytes)
+        upload.reserved_bytes = 0
+    if locked_project.storage_used + payload.file_size > locked_project.storage_quota:
+        PROJECT_QUOTA_REJECTIONS.labels(project=locked_project.slug).inc()
+        await db.commit()
+        raise _api_error(413, "STORAGE_QUOTA_EXCEEDED", "Project storage quota exceeded")
+
+    file_id = str(uuid.uuid4())
+    ext = original_name.rsplit(".", 1)[-1] if "." in original_name else ""
+    object_key = f"projects/{locked_project.slug}/{file_id}{f'.{ext}' if ext else ''}"
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.PROJECT_MULTIPART_SESSION_TTL_HOURS)
+    if upload:
+        upload.status = "PENDING"
+        upload.error_code = "CREATING_MULTIPART"
+        upload.checksum_sha256 = expected_checksum
+        upload.object_key = object_key
+        upload.multipart_upload_id = None
+        upload.upload_kind = "multipart"
+        upload.original_name = original_name
+        upload.mime_type = payload.mime_type
+        upload.file_size = payload.file_size
+        upload.folder_id = destination_folder.id if destination_folder else None
+        upload.metadata_json = payload.metadata
+        upload.part_size = part_size
+        upload.part_count = part_count
+        upload.reserved_bytes = payload.file_size
+        upload.expires_at = expires_at
+        upload.user_id = principal.user.id if principal.user else None
+        upload.service_account_id = principal.service_account.id if principal.service_account else None
+    else:
+        upload = ProjectUpload(
+            project_id=locked_project.id,
+            service_account_id=principal.service_account.id if principal.service_account else None,
+            user_id=principal.user.id if principal.user else None,
+            idempotency_key=idempotency_key,
+            checksum_sha256=expected_checksum,
+            object_key=object_key,
+            upload_kind="multipart",
+            original_name=original_name,
+            mime_type=payload.mime_type,
+            file_size=payload.file_size,
+            folder_id=destination_folder.id if destination_folder else None,
+            metadata_json=payload.metadata,
+            part_size=part_size,
+            part_count=part_count,
+            reserved_bytes=payload.file_size,
+            status="PENDING",
+            error_code="CREATING_MULTIPART",
+            expires_at=expires_at,
+        )
+        db.add(upload)
+    locked_project.storage_used += payload.file_size
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_IN_PROGRESS", "Idempotency key was claimed by another request")
+    await db.refresh(upload)
+
+    if stale_object_key and stale_multipart_id:
+        try:
+            await asyncio.to_thread(
+                minio_client._abort_multipart_upload,
+                settings.MINIO_BUCKET_FILES,
+                stale_object_key,
+                stale_multipart_id,
+            )
+        except Exception:
+            pass
+    try:
+        multipart_upload_id = await asyncio.to_thread(
+            minio_client._create_multipart_upload,
+            settings.MINIO_BUCKET_FILES,
+            object_key,
+            {"Content-Type": payload.mime_type},
+        )
+    except Exception:
+        await _release_project_reservation(db, locked_project.id, upload.id, "STORAGE_UNAVAILABLE")
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "Multipart upload could not be created")
+
+    project_lock = await db.execute(select(Project).where(Project.id == locked_project.id).with_for_update())
+    project_lock.scalar_one()
+    upload_result = await db.execute(select(ProjectUpload).where(ProjectUpload.id == upload.id).with_for_update())
+    current_upload = upload_result.scalar_one()
+    if current_upload.status != "PENDING":
+        await db.rollback()
+        try:
+            await asyncio.to_thread(
+                minio_client._abort_multipart_upload,
+                settings.MINIO_BUCKET_FILES,
+                object_key,
+                multipart_upload_id,
+            )
+        except Exception:
+            pass
+        raise _api_error(409, "UPLOAD_NOT_PENDING", "Upload session is no longer active")
+    current_upload.multipart_upload_id = multipart_upload_id
+    current_upload.error_code = None
+    await db.commit()
+    return _upload_session_to_dict(current_upload)
+
+
+@app.get("/api/v1/projects/{project_id}/upload-sessions/{session_id}")
+async def get_project_upload_session(
+    project_id: str,
+    session_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"viewer", "editor", "admin"},
+    )
+    result = await db.execute(select(ProjectUpload).where(
+        ProjectUpload.id == session_id,
+        ProjectUpload.project_id == principal.project.id,
+        ProjectUpload.upload_kind == "multipart",
+    ))
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise _api_error(404, "UPLOAD_NOT_FOUND", "Upload session not found")
+    stored = await db.get(File, upload.file_id) if upload.file_id else None
+    return _upload_session_to_dict(upload, file=stored)
+
+
+@app.get("/api/v1/projects/{project_id}/upload-sessions/{session_id}/parts/{part_number}")
+async def get_project_upload_part_url(
+    project_id: str,
+    session_id: str,
+    part_number: int,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    result = await db.execute(select(ProjectUpload).where(
+        ProjectUpload.id == session_id,
+        ProjectUpload.project_id == principal.project.id,
+        ProjectUpload.upload_kind == "multipart",
+    ))
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise _api_error(404, "UPLOAD_NOT_FOUND", "Upload session not found")
+    if upload.status != "PENDING" or not upload.multipart_upload_id or upload.error_code:
+        raise _api_error(409, "UPLOAD_NOT_PENDING", "Upload session is not ready for parts")
+    if part_number < 1 or part_number > (upload.part_count or 0):
+        raise _api_error(400, "INVALID_PART", "Part number is outside the upload range")
+    expires_at = _as_utc(upload.expires_at)
+    if expires_at and expires_at <= datetime.now(timezone.utc):
+        raise _api_error(410, "UPLOAD_EXPIRED", "Upload session has expired")
+    url = await asyncio.to_thread(
+        minio_public_client.get_presigned_url,
+        "PUT",
+        settings.MINIO_BUCKET_FILES,
+        upload.object_key,
+        expires=timedelta(seconds=settings.PROJECT_MULTIPART_URL_TTL_SECONDS),
+        extra_query_params={
+            "uploadId": upload.multipart_upload_id,
+            "partNumber": str(part_number),
+        },
+    )
+    return {"part_number": part_number, "url": url, "expires_in": settings.PROJECT_MULTIPART_URL_TTL_SECONDS}
+
+
+@app.post("/api/v1/projects/{project_id}/upload-sessions/{session_id}/complete")
+async def complete_project_upload_session(
+    project_id: str,
+    session_id: str,
+    payload: ProjectUploadCompleteRequest,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    project_result = await db.execute(select(Project).where(Project.id == principal.project.id).with_for_update())
+    locked_project = project_result.scalar_one()
+    upload_result = await db.execute(select(ProjectUpload).where(
+        ProjectUpload.id == session_id,
+        ProjectUpload.project_id == locked_project.id,
+        ProjectUpload.upload_kind == "multipart",
+    ).with_for_update())
+    upload = upload_result.scalar_one_or_none()
+    if not upload:
+        await db.rollback()
+        raise _api_error(404, "UPLOAD_NOT_FOUND", "Upload session not found")
+    if upload.status == "AVAILABLE" and upload.file_id:
+        stored = await db.get(File, upload.file_id)
+        await db.commit()
+        return _project_file_to_dict(stored)
+    if upload.status != "PENDING" or not upload.multipart_upload_id:
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_NOT_PENDING", "Upload session is not pending")
+    expires_at = _as_utc(upload.expires_at)
+    if expires_at and expires_at <= datetime.now(timezone.utc):
+        await db.rollback()
+        raise _api_error(410, "UPLOAD_EXPIRED", "Upload session has expired")
+    expected_numbers = list(range(1, (upload.part_count or 0) + 1))
+    received_numbers = [part.part_number for part in payload.parts]
+    if received_numbers != expected_numbers:
+        await db.rollback()
+        raise _api_error(400, "INVALID_PARTS", "All upload parts must be supplied once and in order")
+    if upload.error_code == "COMPLETING":
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_IN_PROGRESS", "Upload is already being completed")
+
+    object_key = upload.object_key
+    multipart_upload_id = upload.multipart_upload_id
+    expected_size = upload.file_size
+    expected_checksum = upload.checksum_sha256 if upload.checksum_sha256 != "0" * 64 else None
+    upload.error_code = "COMPLETING"
+    await db.commit()
+
+    parts = [Part(item.part_number, item.etag.strip('"')) for item in payload.parts]
+    try:
+        await asyncio.to_thread(
+            minio_client._complete_multipart_upload,
+            settings.MINIO_BUCKET_FILES,
+            object_key,
+            multipart_upload_id,
+            parts,
+        )
+    except Exception:
+        try:
+            await asyncio.to_thread(minio_client.stat_object, settings.MINIO_BUCKET_FILES, object_key)
+        except Exception:
+            project_lock = await db.execute(select(Project).where(Project.id == locked_project.id).with_for_update())
+            project_lock.scalar_one()
+            retry_result = await db.execute(select(ProjectUpload).where(ProjectUpload.id == session_id).with_for_update())
+            retry_upload = retry_result.scalar_one_or_none()
+            if retry_upload and retry_upload.status == "PENDING":
+                retry_upload.error_code = None
+                await db.commit()
+            else:
+                await db.rollback()
+            raise _api_error(503, "STORAGE_UNAVAILABLE", "Multipart upload could not be completed")
+
+    stat = await asyncio.to_thread(minio_client.stat_object, settings.MINIO_BUCKET_FILES, object_key)
+    if stat.size != expected_size:
+        try:
+            await asyncio.to_thread(minio_client.remove_object, settings.MINIO_BUCKET_FILES, object_key)
+        finally:
+            await _release_project_reservation(db, locked_project.id, session_id, "SIZE_MISMATCH")
+        raise _api_error(400, "INVALID_FILE", "Uploaded object size does not match the session")
+    checksum = await asyncio.to_thread(_hash_minio_object, object_key)
+    if expected_checksum and checksum != expected_checksum:
+        try:
+            await asyncio.to_thread(minio_client.remove_object, settings.MINIO_BUCKET_FILES, object_key)
+        finally:
+            await _release_project_reservation(db, locked_project.id, session_id, "CHECKSUM_MISMATCH")
+        raise _api_error(400, "INVALID_FILE", "Uploaded object checksum does not match")
+
+    project_lock = await db.execute(select(Project).where(Project.id == locked_project.id).with_for_update())
+    final_project = project_lock.scalar_one()
+    final_result = await db.execute(select(ProjectUpload).where(ProjectUpload.id == session_id).with_for_update())
+    final_upload = final_result.scalar_one_or_none()
+    if not final_upload or final_upload.status != "PENDING" or final_upload.error_code != "COMPLETING":
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_NOT_PENDING", "Upload session changed while completing")
+
+    file_id = str(uuid.uuid4())
+    original_name = final_upload.original_name or "unnamed"
+    ext = original_name.rsplit(".", 1)[-1] if "." in original_name else ""
+    metadata = dict(final_upload.metadata_json or {})
+    metadata["checksum_sha256"] = checksum
+    db_file = File(
+        id=file_id,
+        filename=f"{file_id}{f'.{ext}' if ext else ''}",
+        original_name=original_name,
+        mime_type=final_upload.mime_type or "application/octet-stream",
+        size=expected_size,
+        folder_id=final_upload.folder_id,
+        user_id=final_upload.user_id,
+        project_id=final_project.id,
+        created_by_service_account_id=final_upload.service_account_id,
+        minio_bucket=settings.MINIO_BUCKET_FILES,
+        minio_key=object_key,
+        checksum_sha256=checksum,
+        status="AVAILABLE",
+        metadata_json=metadata,
+        retention_until=_project_retention_until(final_project, metadata),
+    )
+    db.add(db_file)
+    db.add(FileVersion(
+        file_id=file_id,
+        version_number=1,
+        minio_key=object_key,
+        size=expected_size,
+        checksum_sha256=checksum,
+        uploaded_by=final_upload.user_id,
+        uploaded_by_service_account_id=final_upload.service_account_id,
+    ))
+    final_upload.file_id = file_id
+    final_upload.status = "AVAILABLE"
+    final_upload.error_code = None
+    final_upload.reserved_bytes = 0
+    final_upload.multipart_upload_id = None
+    final_upload.checksum_sha256 = checksum
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            await asyncio.to_thread(minio_client.remove_object, settings.MINIO_BUCKET_FILES, object_key)
+        except Exception:
+            pass
+        await _release_project_reservation(db, final_project.id, session_id, "METADATA_WRITE_FAILED")
+        raise _api_error(503, "STORAGE_UNAVAILABLE", "File metadata could not be committed")
+    await db.refresh(db_file)
+    await _emit_event("FILE_UPLOADED", {
+        "file_id": db_file.id,
+        "user_id": final_upload.user_id,
+        "project_id": final_project.id,
+        "service_account_id": final_upload.service_account_id,
+        "filename": db_file.original_name,
+        "mime_type": db_file.mime_type,
+        "size": expected_size,
+        "minio_key": object_key,
+    })
+    PROJECT_UPLOAD_BYTES.labels(project=final_project.slug).inc(expected_size)
+    return _project_file_to_dict(db_file)
+
+
+@app.delete("/api/v1/projects/{project_id}/upload-sessions/{session_id}", status_code=204)
+async def abort_project_upload_session(
+    project_id: str,
+    session_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    project_result = await db.execute(select(Project).where(Project.id == principal.project.id).with_for_update())
+    locked_project = project_result.scalar_one()
+    upload_result = await db.execute(select(ProjectUpload).where(
+        ProjectUpload.id == session_id,
+        ProjectUpload.project_id == locked_project.id,
+        ProjectUpload.upload_kind == "multipart",
+    ).with_for_update())
+    upload = upload_result.scalar_one_or_none()
+    if not upload:
+        await db.rollback()
+        raise _api_error(404, "UPLOAD_NOT_FOUND", "Upload session not found")
+    if upload.status == "AVAILABLE":
+        await db.rollback()
+        raise _api_error(409, "UPLOAD_NOT_PENDING", "Completed uploads cannot be aborted")
+    object_key = upload.object_key
+    multipart_upload_id = upload.multipart_upload_id
+    locked_project.storage_used = max(0, locked_project.storage_used - upload.reserved_bytes)
+    upload.reserved_bytes = 0
+    upload.status = "FAILED"
+    upload.error_code = "ABORTED"
+    upload.multipart_upload_id = None
+    await db.commit()
+    if object_key and multipart_upload_id:
+        try:
+            await asyncio.to_thread(
+                minio_client._abort_multipart_upload,
+                settings.MINIO_BUCKET_FILES,
+                object_key,
+                multipart_upload_id,
+            )
+        except Exception:
+            pass
+    if object_key:
+        try:
+            await asyncio.to_thread(minio_client.remove_object, settings.MINIO_BUCKET_FILES, object_key)
+        except Exception:
+            pass
+
+
 @app.post("/api/v1/projects/{project_id}/files/upload", status_code=201)
 async def upload_project_file(
     project_id: str,
@@ -915,6 +1476,9 @@ async def upload_project_file(
     )
     upload = existing_result.scalar_one_or_none()
     if upload:
+        if upload.upload_kind != "proxy":
+            await db.rollback()
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotency key belongs to a multipart upload")
         if upload.checksum_sha256 != checksum:
             await db.rollback()
             raise _api_error(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already exists for different content")

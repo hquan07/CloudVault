@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     MINIO_ROOT_PASSWORD: str = Field(min_length=32)
     MINIO_BUCKET_FILES: str = "cloudvault-files"
     MINIO_BUCKET_THUMBNAILS: str = "cloudvault-thumbnails"
+    PROJECT_MULTIPART_PART_SIZE: int = 8 * 1024 * 1024
+    PROJECT_MULTIPART_URL_TTL_SECONDS: int = 900
+    PROJECT_MULTIPART_SESSION_TTL_HOURS: int = 6
 
     # JWT
     JWT_SECRET_KEY: str = Field(min_length=32)
