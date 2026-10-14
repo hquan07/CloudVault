@@ -319,6 +319,18 @@ export const projectApi = {
     method: 'POST', body: JSON.stringify(data),
   }),
 
+  update: (projectId: string, data: {
+    name?: string;
+    description?: string;
+    status?: 'active' | 'suspended';
+    storage_quota?: number;
+    max_file_size?: number;
+    warning_percent?: number;
+    retention_policy?: Record<string, unknown>;
+  }) => request<Project>(`${AUTH_BASE}/projects/${projectId}`, {
+    method: 'PUT', body: JSON.stringify(data),
+  }),
+
   archive: (projectId: string) =>
     request<Project>(`${AUTH_BASE}/projects/${projectId}/archive`, { method: 'POST' }),
 

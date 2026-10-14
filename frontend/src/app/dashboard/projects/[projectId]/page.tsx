@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
-  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Shield, Star, Trash2, Upload, UserPlus, X,
+  HardDrive, KeyRound, Loader2, RefreshCw, RotateCcw, Save, Shield, Star, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
@@ -24,6 +24,7 @@ function errorMessage(error: unknown): string {
     if (typeof detail === 'string') return detail;
     return error.message;
   }
+  if (error instanceof Error) return error.message;
   return 'Unable to complete the request.';
 }
 
@@ -52,6 +53,8 @@ export default function ProjectDetailPage() {
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -213,6 +216,36 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setSavingSettings(true);
+    setSettingsSaved(false);
+    setError('');
+    try {
+      const parsedRetention = JSON.parse(String(form.get('retention_policy') || '{}')) as unknown;
+      if (!parsedRetention || typeof parsedRetention !== 'object' || Array.isArray(parsedRetention)) {
+        throw new Error('Retention policy must be a JSON object.');
+      }
+      const updated = await projectApi.update(projectId, {
+        name: String(form.get('name')),
+        description: String(form.get('description') || ''),
+        ...(project?.status !== 'archived' ? { status: String(form.get('status')) as 'active' | 'suspended' } : {}),
+        storage_quota: Math.round(Number(form.get('quota_gb')) * 1024 ** 3),
+        max_file_size: Math.round(Number(form.get('max_file_mb')) * 1024 ** 2),
+        warning_percent: Number(form.get('warning_percent')),
+        retention_policy: parsedRetention as Record<string, unknown>,
+      });
+      setProject(updated);
+      setUsage(await projectApi.getUsage(projectId));
+      setSettingsSaved(true);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   const addMember = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -282,7 +315,7 @@ export default function ProjectDetailPage() {
   const usagePercent = Math.min(100, usage?.percentage || 0);
   const tabs: { id: Tab; label: string }[] = [
     { id: 'files', label: 'Files' }, { id: 'trash', label: `Trash${trash.length ? ` (${trash.length})` : ''}` },
-    { id: 'members', label: 'Members' }, { id: 'policy', label: 'Policy' },
+    { id: 'members', label: 'Members' }, { id: 'policy', label: 'Settings' },
     ...(isAdmin ? [{ id: 'access' as Tab, label: 'Service accounts' }] : []),
   ];
 
@@ -399,7 +432,34 @@ export default function ProjectDetailPage() {
       )}
 
       {tab === 'policy' && (
-        <section className="grid gap-5 md:grid-cols-3"><div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Maximum file size</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(project.max_file_size)}</div></div><div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Quota warning</div><div className="mt-2 text-xl font-semibold text-white">{project.warning_percent}%</div></div><div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Available storage</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(usage?.available_bytes || 0)}</div></div><div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 md:col-span-3"><h2 className="font-medium text-white">Retention policy</h2><pre className="mt-3 overflow-x-auto rounded-xl bg-gray-950 p-4 text-sm text-gray-300">{JSON.stringify(project.retention_policy || {}, null, 2)}</pre></div></section>
+        <section className="space-y-5">
+          <div className="grid gap-5 md:grid-cols-3">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Maximum file size</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(project.max_file_size)}</div></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Quota warning</div><div className="mt-2 text-xl font-semibold text-white">{project.warning_percent}%</div></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Available storage</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(usage?.available_bytes || 0)}</div></div>
+          </div>
+          {isAdmin ? (
+            <form key={project.updated_at} onSubmit={saveSettings} className="space-y-5 rounded-2xl border border-gray-800 bg-gray-900 p-6">
+              <div><h2 className="text-lg font-semibold text-white">Project settings</h2><p className="mt-1 text-sm text-gray-500">Changes apply to both browser users and connected applications.</p></div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-gray-300">Name<input required name="name" minLength={2} maxLength={120} defaultValue={project.name} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                <label className="text-sm text-gray-300">Status<select name="status" defaultValue={project.status === 'archived' ? 'archived' : project.status} disabled={project.status === 'archived'} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 capitalize text-white disabled:opacity-60"><option value="active">Active</option><option value="suspended">Suspended</option>{project.status === 'archived' && <option value="archived">Archived</option>}</select></label>
+                <label className="text-sm text-gray-300 md:col-span-2">Description<textarea name="description" maxLength={1000} rows={3} defaultValue={project.description || ''} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                <label className="text-sm text-gray-300">Quota (GB)<input required name="quota_gb" type="number" min="0" step="0.01" defaultValue={Number((project.storage_quota / 1024 ** 3).toFixed(4))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                <label className="text-sm text-gray-300">Maximum file size (MB)<input required name="max_file_mb" type="number" min="1" step="1" defaultValue={Number((project.max_file_size / 1024 ** 2).toFixed(2))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                <label className="text-sm text-gray-300">Warning threshold (%)<input required name="warning_percent" type="number" min="1" max="100" defaultValue={project.warning_percent} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                <label className="text-sm text-gray-300 md:col-span-2">Retention policy (JSON)<textarea required name="retention_policy" rows={8} defaultValue={JSON.stringify(project.retention_policy || {}, null, 2)} spellCheck={false} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 font-mono text-sm text-gray-200" /></label>
+              </div>
+              {project.status === 'archived' && <p className="text-sm text-amber-300">Use Restore project before changing its lifecycle status. Other policy fields can still be updated.</p>}
+              <div className="flex items-center justify-end gap-3">
+                {settingsSaved && <span className="inline-flex items-center gap-2 text-sm text-emerald-300"><Check size={16} /> Saved</span>}
+                <button disabled={savingSettings} className="inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950 disabled:opacity-50">{savingSettings ? <Loader2 className="animate-spin" size={17} /> : <Save size={17} />} Save settings</button>
+              </div>
+            </form>
+          ) : (
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><h2 className="font-medium text-white">Retention policy</h2><pre className="mt-3 overflow-x-auto rounded-xl bg-gray-950 p-4 text-sm text-gray-300">{JSON.stringify(project.retention_policy || {}, null, 2)}</pre></div>
+          )}
+        </section>
       )}
 
       {tab === 'access' && isAdmin && (
