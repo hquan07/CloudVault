@@ -331,35 +331,48 @@ export default function ArchitectureTab() {
 
   return (
     <div style={{ padding: '24px' }}>
-      <div style={{ marginBottom: '20px' }}>
-        <h2 style={{ fontSize: '24px', margin: '0 0 8px', fontWeight: 'bold' }}>CloudVault Architecture</h2>
-        <p style={{ color: '#94a3b8', margin: 0 }}>
-          Personal and project storage topology. Click a node to inspect its role.
-        </p>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '10px', color: '#94a3b8', fontSize: '12px' }}>
-          <span>🟢 Live API health</span>
-          <span>🔴 API health check failed</span>
-          <span>⚪ Documented component</span>
-          <span>Live probes cover Auth, File and Metadata APIs only.</span>
-          {lastChecked && <span>Checked {lastChecked.toLocaleTimeString()}</span>}
+      <div className="mb-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(680px,1.15fr)] xl:items-start">
+        <div>
+          <h2 style={{ fontSize: '24px', margin: '0 0 8px', fontWeight: 'bold' }}>CloudVault Architecture</h2>
+          <p style={{ color: '#94a3b8', margin: 0 }}>
+            Personal and project storage topology. Click a node to inspect its role.
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '10px', color: '#94a3b8', fontSize: '12px' }}>
+            <span>🟢 Live API health</span>
+            <span>🔴 API health check failed</span>
+            <span>⚪ Documented component</span>
+          </div>
+          <p className="mt-3 max-w-xl text-xs leading-5 text-slate-500">
+            Live probes cover Auth, File and Metadata APIs only.
+            {lastChecked && <> Last checked {lastChecked.toLocaleTimeString()}.</>}
+          </p>
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 16px', marginTop: '12px', color: '#cbd5e1', fontSize: '12px' }}>
-          <span style={{ fontWeight: 700, color: '#f8fafc' }}>Connections</span>
-          {connectionLegend.map((item) => (
-            <span key={item.label} style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
-              <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: `3px solid ${item.color}` }} />
-              {item.label}
+
+        <div className="rounded-2xl border border-slate-700/80 bg-slate-900/75 p-4 shadow-lg shadow-black/20">
+          <div className="mb-3 flex items-baseline justify-between gap-3 border-b border-slate-800 pb-3">
+            <h3 className="text-sm font-semibold text-slate-100">Connection legend</h3>
+            <span className="text-[10px] uppercase tracking-[0.18em] text-slate-500">9 conventions</span>
+          </div>
+          <div className="grid grid-cols-1 gap-x-5 gap-y-3 text-[11px] text-slate-300 sm:grid-cols-2 lg:grid-cols-3">
+            {connectionLegend.map((item) => (
+              <span key={item.label} className="inline-flex min-w-0 items-center gap-2">
+                <span aria-hidden="true" className="inline-block w-6 shrink-0" style={{ borderTop: `3px solid ${item.color}` }} />
+                <span className="leading-4">{item.label}</span>
+              </span>
+            ))}
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <span aria-hidden="true" className="inline-block w-6 shrink-0 border-t-[3px] border-slate-400" />
+              <span className="leading-4">Primary request / data path</span>
             </span>
-          ))}
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
-            <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: '3px solid #94a3b8' }} />
-            Primary request / data path
-          </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
-            <span aria-hidden="true" style={{ display: 'inline-block', width: '24px', borderTop: '3px dashed #94a3b8' }} />
-            Notification / control / telemetry
-          </span>
-          <span>Arrowheads show flow direction.</span>
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <span aria-hidden="true" className="inline-block w-6 shrink-0 border-t-[3px] border-dashed border-slate-400" />
+              <span className="leading-4">Notification / control / telemetry</span>
+            </span>
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <span aria-hidden="true" className="inline-flex w-6 shrink-0 items-center justify-center text-lg leading-none text-slate-400">→</span>
+              <span className="leading-4">Arrow shows flow direction</span>
+            </span>
+          </div>
         </div>
       </div>
 
