@@ -15,22 +15,24 @@ import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
-from sqlalchemy import select, func
+from sqlalchemy import delete, select, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import async_session, get_db
-from app.models import User, RefreshToken, Project, ProjectMembership, ServiceAccount
+from app.models import (
+    User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ServiceAccount,
+)
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest,
     UpdateProfileRequest, AuthResponse, MeResponse,
     MessageResponse, UserResponse, TokenPair,
-    AdminStatsResponse, ProjectCreateRequest, ProjectUpdateRequest,
+    AdminStatsResponse, ProjectCreateRequest, ProjectDeleteRequest, ProjectUpdateRequest,
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
     ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
     ServiceAccountCreateRequest, ServiceAccountResponse, ServiceAccountIssuedResponse,
@@ -564,6 +566,11 @@ async def update_project(
     updates = req.model_dump(exclude_unset=True)
     if "status" in updates and updates["status"] not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid project status")
+    if updates.get("status") == "archived" or (project.status == "archived" and "status" in updates):
+        raise HTTPException(
+            status_code=409,
+            detail="Use the project archive or restore endpoint to change archived state",
+        )
     if "storage_quota" in updates and updates["storage_quota"] < project.storage_used:
         raise HTTPException(status_code=409, detail="Quota cannot be lower than storage used")
     for key, value in updates.items():
@@ -571,6 +578,68 @@ async def update_project(
     await db.commit()
     await db.refresh(project)
     return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.post("/api/v1/projects/{project_id}/archive", response_model=ProjectResponse)
+async def archive_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user, {"admin"})
+    if project.status != "archived":
+        revoked_at = datetime.now(timezone.utc)
+        project.status = "archived"
+        await db.execute(
+            update(ServiceAccount)
+            .where(ServiceAccount.project_id == project.id, ServiceAccount.is_active.is_(True))
+            .values(is_active=False, token_hash=None, revoked_at=revoked_at)
+        )
+        await db.commit()
+        await db.refresh(project)
+    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.post("/api/v1/projects/{project_id}/restore", response_model=ProjectResponse)
+async def restore_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user, {"admin"})
+    if project.status != "archived":
+        raise HTTPException(status_code=409, detail="Only archived projects can be restored")
+    project.status = "active"
+    await db.commit()
+    await db.refresh(project)
+    return _project_response(project, "admin" if user.role == "admin" else membership.role)
+
+
+@app.delete("/api/v1/projects/{project_id}", status_code=204)
+async def delete_project(
+    project_id: str,
+    req: ProjectDeleteRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, _ = await _project_membership(db, project_id, user, {"admin"})
+    if req.confirm_slug != project.slug:
+        raise HTTPException(status_code=400, detail="Project slug confirmation does not match")
+    if project.status != "archived":
+        raise HTTPException(status_code=409, detail="Archive the project before deleting it")
+
+    file_count = await db.scalar(
+        select(func.count()).select_from(ProjectFileRecord).where(ProjectFileRecord.project_id == project.id)
+    )
+    if file_count or project.storage_used:
+        raise HTTPException(
+            status_code=409,
+            detail="Project still contains files. Empty project trash before permanent deletion",
+        )
+
+    await db.execute(delete(Project).where(Project.id == project.id))
+    await db.commit()
+    return Response(status_code=204)
 
 
 @app.get(
@@ -759,6 +828,8 @@ async def create_service_account(
     db: AsyncSession = Depends(get_db),
 ):
     project, _ = await _project_membership(db, project_id, user, {"admin"})
+    if project.status != "active":
+        raise HTTPException(status_code=409, detail="Project must be active to create service accounts")
     _validate_service_account_request(req)
     raw_token, prefix, token_hash = create_service_token()
     account = ServiceAccount(
@@ -792,6 +863,8 @@ async def rotate_service_account(
     db: AsyncSession = Depends(get_db),
 ):
     project, _ = await _project_membership(db, project_id, user, {"admin"})
+    if project.status != "active":
+        raise HTTPException(status_code=409, detail="Restore the project before rotating service accounts")
     account = await db.get(ServiceAccount, account_id)
     if not account or account.project_id != project.id:
         raise HTTPException(status_code=404, detail="Service account not found")

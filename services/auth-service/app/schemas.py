@@ -94,6 +94,10 @@ class ProjectUpdateRequest(BaseModel):
     retention_policy: Optional[dict[str, Any]] = None
 
 
+class ProjectDeleteRequest(BaseModel):
+    confirm_slug: str
+
+
 class ProjectMembershipRequest(BaseModel):
     user_id: str
     role: str = "viewer"

@@ -313,6 +313,17 @@ export const projectApi = {
     method: 'POST', body: JSON.stringify(data),
   }),
 
+  archive: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/archive`, { method: 'POST' }),
+
+  restore: (projectId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/restore`, { method: 'POST' }),
+
+  delete: (projectId: string, confirmSlug: string) =>
+    request<void>(`${AUTH_BASE}/projects/${projectId}`, {
+      method: 'DELETE', body: JSON.stringify({ confirm_slug: confirmSlug }),
+    }),
+
   getUsage: (projectId: string) =>
     request<ProjectUsage>(`${FILE_BASE}/projects/${projectId}/usage`),
 

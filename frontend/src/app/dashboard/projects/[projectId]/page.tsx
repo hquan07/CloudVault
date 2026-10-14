@@ -2,10 +2,10 @@
 
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import {
-  AlertCircle, ArrowLeft, Check, Copy, Download, Eye, File, HardDrive, KeyRound,
-  Loader2, RefreshCw, Shield, Trash2, Upload, UserPlus, X,
+  AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
+  HardDrive, KeyRound, Loader2, RefreshCw, Shield, Trash2, Upload, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, Project, ProjectFile, ProjectMember, ProjectUsage, ServiceAccount, projectApi,
@@ -33,6 +33,7 @@ function formatDate(value: string | null): string {
 
 export default function ProjectDetailPage() {
   const params = useParams<{ projectId: string }>();
+  const router = useRouter();
   const projectId = params.projectId;
   const [project, setProject] = useState<Project | null>(null);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
@@ -47,6 +48,9 @@ export default function ProjectDetailPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [secret, setSecret] = useState<{ name: string; token: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
 
   const loadData = useCallback(async () => {
     try {
@@ -71,8 +75,57 @@ export default function ProjectDetailPage() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  const canWrite = project?.member_role === 'editor' || project?.member_role === 'admin';
+  const canWrite = project?.status === 'active'
+    && (project.member_role === 'editor' || project.member_role === 'admin');
   const isAdmin = project?.member_role === 'admin';
+
+  const archiveProject = async () => {
+    if (!project || !window.confirm(
+      `Archive ${project.name}? All service-account tokens will be revoked immediately.`,
+    )) return;
+    setLifecycleBusy(true);
+    setError('');
+    try {
+      const updated = await projectApi.archive(projectId);
+      setProject(updated);
+      setAccounts((current) => current.map((account) => ({
+        ...account, is_active: false, token_prefix: null, revoked_at: new Date().toISOString(),
+      })));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
+  const restoreProject = async () => {
+    setLifecycleBusy(true);
+    setError('');
+    try {
+      setProject(await projectApi.restore(projectId));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
+  const deleteProject = async () => {
+    if (!project || deleteConfirmation !== project.slug) return;
+    setLifecycleBusy(true);
+    setError('');
+    try {
+      await projectApi.delete(projectId, deleteConfirmation);
+      router.replace('/dashboard/projects');
+      router.refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+      setShowDelete(false);
+      setDeleteConfirmation('');
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
 
   const uploadFile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -210,13 +263,33 @@ export default function ProjectDetailPage() {
             <p className="mt-2 font-mono text-xs text-gray-500">{project.slug}</p>
             <p className="mt-3 max-w-2xl text-sm text-gray-400">{project.description || 'No description provided.'}</p>
           </div>
-          <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950/60 p-4">
-            <div className="mb-2 flex justify-between text-sm"><span className="inline-flex items-center gap-2 text-gray-300"><HardDrive size={16} /> Project storage</span><span className="text-gray-400">{usagePercent.toFixed(1)}%</span></div>
-            <div className="h-2.5 overflow-hidden rounded-full bg-gray-800"><div className={`h-full ${usagePercent >= project.warning_percent ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${usagePercent}%` }} /></div>
-            <div className="mt-2 flex justify-between text-xs text-gray-500"><span>{formatBytes(usage?.storage_used || 0)} used</span><span>{formatBytes(usage?.storage_quota || 0)} total</span></div>
+          <div className="w-full max-w-md space-y-3">
+            <div className="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+              <div className="mb-2 flex justify-between text-sm"><span className="inline-flex items-center gap-2 text-gray-300"><HardDrive size={16} /> Project storage</span><span className="text-gray-400">{usagePercent.toFixed(1)}%</span></div>
+              <div className="h-2.5 overflow-hidden rounded-full bg-gray-800"><div className={`h-full ${usagePercent >= project.warning_percent ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${usagePercent}%` }} /></div>
+              <div className="mt-2 flex justify-between text-xs text-gray-500"><span>{formatBytes(usage?.storage_used || 0)} used</span><span>{formatBytes(usage?.storage_quota || 0)} total</span></div>
+            </div>
+            {isAdmin && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {project.status === 'archived' ? (
+                  <>
+                    <button disabled={lifecycleBusy} onClick={() => void restoreProject()} className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 px-3 py-2 text-sm text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"><ArchiveRestore size={16} /> Restore</button>
+                    <button disabled={lifecycleBusy} onClick={() => setShowDelete(true)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:opacity-50"><Trash2 size={16} /> Delete permanently</button>
+                  </>
+                ) : (
+                  <button disabled={lifecycleBusy} onClick={() => void archiveProject()} className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 px-3 py-2 text-sm text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"><Archive size={16} /> Archive project</button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      {project.status === 'archived' && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
+          This project is read-only. Its service-account tokens were revoked when it was archived and must be rotated after restoration.
+        </div>
+      )}
 
       {error && <div className="flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-300"><span className="flex items-center gap-3"><AlertCircle size={18} />{error}</span><button onClick={() => setError('')}><X size={17} /></button></div>}
 
@@ -226,7 +299,7 @@ export default function ProjectDetailPage() {
 
       {tab === 'files' && (
         <section className="space-y-5">
-          {canWrite && project.status === 'active' && (
+          {canWrite && (
             <form onSubmit={uploadFile} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-5 md:grid-cols-[1fr_180px_180px_auto] md:items-end">
               <label className="text-sm text-gray-300">File<input required name="file" type="file" className="mt-1.5 block w-full rounded-lg border border-gray-700 bg-gray-950 p-2 text-sm text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-500/10 file:px-3 file:py-1 file:text-cyan-300" /></label>
               <label className="text-sm text-gray-300">Artifact type<input required name="artifact_type" defaultValue="document" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
@@ -258,9 +331,23 @@ export default function ProjectDetailPage() {
       {tab === 'access' && isAdmin && (
         <section className="space-y-5">
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200"><Shield className="mr-2 inline" size={17} />Tokens grant machine access only to this project. A raw token is shown once after creation or rotation.</div>
-          <form onSubmit={createAccount} className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="grid gap-4 lg:grid-cols-[1fr_2fr_auto] lg:items-end"><label className="text-sm text-gray-300">Account name<input required name="name" minLength={2} placeholder="news-flow-worker" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><fieldset><legend className="mb-2 text-sm text-gray-300">Scopes</legend><div className="flex flex-wrap gap-3">{['files:create', 'files:read', 'files:delete', 'project:usage:read'].map((scope) => <label key={scope} className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" name="scopes" value={scope} defaultChecked={scope !== 'files:delete'} className="accent-cyan-500" />{scope}</label>)}</div></fieldset><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><KeyRound size={17} /> Create token</button></div></form>
-          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{accounts.length === 0 ? <div className="p-10 text-center text-gray-500">No service accounts.</div> : accounts.map((account) => <div key={account.id} className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex items-center gap-2"><span className="font-medium text-white">{account.name}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${account.is_active ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>{account.is_active ? 'active' : 'revoked'}</span></div><div className="mt-1 font-mono text-xs text-gray-500">{account.token_prefix ? `${account.token_prefix}…` : 'No active credential'} · last used {formatDate(account.last_used_at)}</div><div className="mt-2 flex flex-wrap gap-1">{account.scopes.map((scope) => <span key={scope} className="rounded bg-gray-800 px-2 py-1 text-[10px] text-gray-400">{scope}</span>)}</div></div><div className="flex gap-2"><button onClick={() => void rotateAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Rotate</button>{account.is_active && <button onClick={() => void revokeAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/20 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Revoke</button>}</div></div>)}</div></div>
+          {project.status === 'active' && <form onSubmit={createAccount} className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="grid gap-4 lg:grid-cols-[1fr_2fr_auto] lg:items-end"><label className="text-sm text-gray-300">Account name<input required name="name" minLength={2} placeholder="news-flow-worker" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><fieldset><legend className="mb-2 text-sm text-gray-300">Scopes</legend><div className="flex flex-wrap gap-3">{['files:create', 'files:read', 'files:delete', 'project:usage:read'].map((scope) => <label key={scope} className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" name="scopes" value={scope} defaultChecked={scope !== 'files:delete'} className="accent-cyan-500" />{scope}</label>)}</div></fieldset><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><KeyRound size={17} /> Create token</button></div></form>}
+          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{accounts.length === 0 ? <div className="p-10 text-center text-gray-500">No service accounts.</div> : accounts.map((account) => <div key={account.id} className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex items-center gap-2"><span className="font-medium text-white">{account.name}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${account.is_active ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>{account.is_active ? 'active' : 'revoked'}</span></div><div className="mt-1 font-mono text-xs text-gray-500">{account.token_prefix ? `${account.token_prefix}…` : 'No active credential'} · last used {formatDate(account.last_used_at)}</div><div className="mt-2 flex flex-wrap gap-1">{account.scopes.map((scope) => <span key={scope} className="rounded bg-gray-800 px-2 py-1 text-[10px] text-gray-400">{scope}</span>)}</div></div><div className="flex gap-2">{project.status === 'active' && <button onClick={() => void rotateAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Rotate</button>}{account.is_active && <button onClick={() => void revokeAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/20 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Revoke</button>}</div></div>)}</div></div>
         </section>
+      )}
+
+      {showDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-red-500/30 bg-gray-900 p-6 shadow-2xl">
+            <h2 className="text-xl font-semibold text-white">Delete project permanently</h2>
+            <p className="mt-2 text-sm text-gray-400">This only succeeds after every project file, including trash, has been permanently removed. Type <strong className="font-mono text-red-300">{project.slug}</strong> to confirm.</p>
+            <input autoFocus value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} className="mt-5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 font-mono text-white outline-none focus:border-red-500" />
+            <div className="mt-5 flex justify-end gap-3">
+              <button onClick={() => { setShowDelete(false); setDeleteConfirmation(''); }} className="rounded-lg px-4 py-2 text-gray-300 hover:bg-gray-800">Cancel</button>
+              <button disabled={lifecycleBusy || deleteConfirmation !== project.slug} onClick={() => void deleteProject()} className="inline-flex items-center gap-2 rounded-lg bg-red-500 px-4 py-2 font-medium text-white disabled:opacity-40">{lifecycleBusy && <Loader2 className="animate-spin" size={16} />} Delete permanently</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {secret && (

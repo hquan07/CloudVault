@@ -81,6 +81,15 @@ class Project(Base):
     service_accounts = relationship("ServiceAccount", back_populates="project", cascade="all, delete-orphan")
 
 
+class ProjectFileRecord(Base):
+    """Minimal files-table mapping used for safe project lifecycle checks."""
+
+    __tablename__ = "files"
+
+    id = Column(String(36), primary_key=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
+
+
 class ProjectMembership(Base):
     __tablename__ = "project_memberships"
 
