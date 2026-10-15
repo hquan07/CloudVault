@@ -132,11 +132,13 @@ export default function LandingPage() {
               <input
                 type="password"
                 required
+                minLength={isLogin ? undefined : 12}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full bg-gray-950/50 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all placeholder:text-gray-600"
                 placeholder="••••••••"
               />
+              {!isLogin && <p className="mt-1.5 text-xs text-gray-500">Use at least 12 characters.</p>}
             </div>
             
             <button

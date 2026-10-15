@@ -37,6 +37,8 @@ function clearTokens() {
   localStorage.removeItem('cloudvault_refresh_token');
 }
 
+let refreshInFlight: Promise<boolean> | null = null;
+
 async function request<T = unknown>(
   url: string,
   options: RequestInit = {},
@@ -84,7 +86,7 @@ async function request<T = unknown>(
   return await res.json();
 }
 
-async function refreshAccessToken(): Promise<boolean> {
+async function performRefresh(): Promise<boolean> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) return false;
   try {
@@ -103,6 +105,23 @@ async function refreshAccessToken(): Promise<boolean> {
     }
   } catch { /* ignore */ }
   return false;
+}
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+export interface AuthSession {
+  id: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+  expires_at: string;
 }
 
 /* ── Auth API ── */
@@ -125,6 +144,20 @@ export const authApi = {
 
   updateProfile: (data: { username?: string; avatar_url?: string }) =>
     request(`${AUTH_BASE}/auth/me`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/change-password`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  listSessions: () => request<AuthSession[]>(`${AUTH_BASE}/auth/sessions`),
+
+  revokeSession: (sessionId: string) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/sessions/${sessionId}`, { method: 'DELETE' }),
+
+  revokeAllSessions: () =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/sessions`, { method: 'DELETE' }),
 };
 
 /* ── File API ── */
