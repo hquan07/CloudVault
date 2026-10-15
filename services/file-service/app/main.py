@@ -433,6 +433,8 @@ def _project_folder_to_dict(folder: Folder) -> dict:
         "parent_id": folder.parent_id,
         "path": folder.path,
         "depth": folder.depth,
+        "is_deleted": folder.is_deleted,
+        "deleted_at": folder.deleted_at.isoformat() if folder.deleted_at else None,
         "created_at": folder.created_at.isoformat() if folder.created_at else None,
         "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
     }
@@ -841,25 +843,119 @@ async def delete_project_folder(
     child_count = await db.scalar(
         select(func.count()).select_from(Folder).where(
             Folder.parent_id == folder.id,
-            Folder.is_deleted == False,
         )
     )
     file_count = await db.scalar(
         select(func.count()).select_from(File).where(File.folder_id == folder.id)
     )
     if child_count or file_count:
-        raise _api_error(409, "FOLDER_NOT_EMPTY", "Move or delete folder contents first")
+        raise _api_error(
+            409,
+            "FOLDER_NOT_EMPTY",
+            "Only empty folders can be moved to trash; remove active and trashed contents first",
+        )
     folder_name = folder.name
-    await db.delete(folder)
+    folder.is_deleted = True
+    folder.deleted_at = datetime.now(timezone.utc)
     await db.commit()
-    await _emit_event("FOLDER_DELETED", {
+    await _emit_event("FOLDER_TRASHED", {
         "folder_id": folder_id,
         "project_id": principal.project.id,
         "user_id": principal.user.id if principal.user else None,
         "service_account_id": principal.service_account.id if principal.service_account else None,
         "folder_name": folder_name,
     })
-    return {"detail": "Project folder deleted"}
+    return {"detail": "Project folder moved to trash"}
+
+
+@app.post("/api/v1/projects/{project_id}/folders/{folder_id}/restore")
+async def restore_project_folder(
+    project_id: str,
+    folder_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:create",
+        user_roles={"editor", "admin"},
+    )
+    if principal.project.status != "active":
+        raise _api_error(409, "PROJECT_NOT_ACTIVE", "Restore the project before restoring folders")
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.project_id == principal.project.id,
+            Folder.is_deleted == True,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise _api_error(404, "FOLDER_NOT_FOUND", "Project folder not found in trash")
+
+    sibling_condition = (
+        Folder.parent_id == folder.parent_id
+        if folder.parent_id
+        else Folder.parent_id.is_(None)
+    )
+    duplicate = await db.scalar(
+        select(Folder.id).where(
+            Folder.project_id == principal.project.id,
+            Folder.name == folder.name,
+            Folder.is_deleted == False,
+            sibling_condition,
+        )
+    )
+    if duplicate:
+        raise _api_error(409, "FOLDER_EXISTS", "An active folder with this name already exists")
+
+    folder.is_deleted = False
+    folder.deleted_at = None
+    await db.commit()
+    await db.refresh(folder)
+    await _emit_event("FOLDER_RESTORED", {
+        "folder_id": folder.id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder.name,
+    })
+    return _project_folder_to_dict(folder)
+
+
+@app.delete("/api/v1/projects/{project_id}/folders/{folder_id}/permanent")
+async def permanently_delete_project_folder(
+    project_id: str,
+    folder_id: str,
+    authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    principal = await _resolve_project_principal(
+        project_id, authorization, db,
+        service_scope="files:delete",
+        user_roles={"admin"},
+    )
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.project_id == principal.project.id,
+            Folder.is_deleted == True,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise _api_error(404, "FOLDER_NOT_FOUND", "Project folder not found in trash")
+    folder_name = folder.name
+    await db.delete(folder)
+    await db.commit()
+    await _emit_event("FOLDER_PERMANENTLY_DELETED", {
+        "folder_id": folder_id,
+        "project_id": principal.project.id,
+        "user_id": principal.user.id if principal.user else None,
+        "service_account_id": principal.service_account.id if principal.service_account else None,
+        "folder_name": folder_name,
+    })
+    return {"detail": "Project folder permanently deleted"}
 
 
 @app.get("/api/v1/projects/{project_id}/files")
@@ -1683,6 +1779,15 @@ async def list_project_trash(
         .offset(offset)
     )
     files = result.scalars().all()
+    folder_result = await db.execute(
+        select(Folder)
+        .where(
+            Folder.project_id == principal.project.id,
+            Folder.is_deleted == True,
+        )
+        .order_by(Folder.deleted_at.desc())
+    )
+    folders = folder_result.scalars().all()
     starred_ids = await _project_starred_ids(
         db,
         principal.user.id if principal.user else None,
@@ -1694,6 +1799,7 @@ async def list_project_trash(
             _project_file_to_dict(item, is_starred=item.id in starred_ids)
             for item in files
         ],
+        "folders": [_project_folder_to_dict(folder) for folder in folders],
         "limit": limit,
         "offset": offset,
     }
@@ -2587,7 +2693,20 @@ async def list_trash(
         .order_by(File.deleted_at.desc())
     )
     files = result.scalars().all()
-    return {"files": [_file_to_dict(f) for f in files]}
+    folder_result = await db.execute(
+        select(Folder)
+        .where(
+            Folder.user_id == user.id,
+            Folder.project_id.is_(None),
+            Folder.is_deleted == True,
+        )
+        .order_by(Folder.deleted_at.desc())
+    )
+    folders = folder_result.scalars().all()
+    return {
+        "files": [_file_to_dict(f) for f in files],
+        "folders": [_personal_folder_to_dict(folder) for folder in folders],
+    }
 
 
 @app.delete("/api/v1/files/{file_id}/permanent")
@@ -2791,7 +2910,12 @@ async def move_file(
     if new_folder_id:
         # Verify folder exists
         folder_result = await db.execute(
-            select(Folder).where(Folder.id == new_folder_id, Folder.user_id == user.id)
+            select(Folder).where(
+                Folder.id == new_folder_id,
+                Folder.user_id == user.id,
+                Folder.project_id.is_(None),
+                Folder.is_deleted == False,
+            )
         )
         if not folder_result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="Destination folder not found")
@@ -2811,6 +2935,19 @@ async def move_file(
 # FOLDERS
 # ══════════════════════════════════════════════
 
+def _personal_folder_to_dict(folder: Folder) -> dict:
+    return {
+        "id": folder.id,
+        "name": folder.name,
+        "parent_id": folder.parent_id,
+        "path": folder.path,
+        "depth": folder.depth,
+        "is_deleted": folder.is_deleted,
+        "deleted_at": folder.deleted_at.isoformat() if folder.deleted_at else None,
+        "created_at": folder.created_at.isoformat() if folder.created_at else None,
+        "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
+    }
+
 @app.post("/api/v1/folders", status_code=201)
 async def create_folder(
     body: dict,
@@ -2827,7 +2964,12 @@ async def create_folder(
 
     if parent_id:
         parent_result = await db.execute(
-            select(Folder).where(Folder.id == parent_id, Folder.user_id == user.id)
+            select(Folder).where(
+                Folder.id == parent_id,
+                Folder.user_id == user.id,
+                Folder.project_id.is_(None),
+                Folder.is_deleted == False,
+            )
         )
         parent = parent_result.scalar_one_or_none()
         if not parent:
@@ -2846,14 +2988,7 @@ async def create_folder(
     await db.commit()
     await db.refresh(folder)
 
-    return {
-        "id": folder.id,
-        "name": folder.name,
-        "parent_id": folder.parent_id,
-        "path": folder.path,
-        "depth": folder.depth,
-        "created_at": folder.created_at.isoformat() if folder.created_at else None,
-    }
+    return _personal_folder_to_dict(folder)
 
 
 @app.get("/api/v1/folders")
@@ -2875,18 +3010,124 @@ async def list_folders(
     folders = result.scalars().all()
 
     return {
-        "folders": [
-            {
-                "id": f.id,
-                "name": f.name,
-                "parent_id": f.parent_id,
-                "path": f.path,
-                "depth": f.depth,
-                "created_at": f.created_at.isoformat() if f.created_at else None,
-            }
-            for f in folders
-        ]
+        "folders": [_personal_folder_to_dict(folder) for folder in folders]
     }
+
+
+@app.delete("/api/v1/folders/{folder_id}")
+async def soft_delete_folder(
+    folder_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.user_id == user.id,
+            Folder.project_id.is_(None),
+            Folder.is_deleted == False,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    child_count = await db.scalar(
+        select(func.count()).select_from(Folder).where(Folder.parent_id == folder.id)
+    )
+    file_count = await db.scalar(
+        select(func.count()).select_from(File).where(File.folder_id == folder.id)
+    )
+    if child_count or file_count:
+        raise HTTPException(
+            status_code=409,
+            detail="Only empty folders can be moved to trash; remove active and trashed contents first",
+        )
+
+    folder.is_deleted = True
+    folder.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    await _emit_event("FOLDER_TRASHED", {
+        "folder_id": folder.id,
+        "user_id": user.id,
+        "folder_name": folder.name,
+    })
+    return {"detail": "Folder moved to trash"}
+
+
+@app.post("/api/v1/folders/{folder_id}/restore")
+async def restore_folder(
+    folder_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.user_id == user.id,
+            Folder.project_id.is_(None),
+            Folder.is_deleted == True,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found in trash")
+
+    sibling_condition = (
+        Folder.parent_id == folder.parent_id
+        if folder.parent_id
+        else Folder.parent_id.is_(None)
+    )
+    duplicate = await db.scalar(
+        select(Folder.id).where(
+            Folder.user_id == user.id,
+            Folder.project_id.is_(None),
+            Folder.name == folder.name,
+            Folder.is_deleted == False,
+            sibling_condition,
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="An active folder with this name already exists")
+
+    folder.is_deleted = False
+    folder.deleted_at = None
+    await db.commit()
+    await db.refresh(folder)
+    await _emit_event("FOLDER_RESTORED", {
+        "folder_id": folder.id,
+        "user_id": user.id,
+        "folder_name": folder.name,
+    })
+    return _personal_folder_to_dict(folder)
+
+
+@app.delete("/api/v1/folders/{folder_id}/permanent")
+async def permanently_delete_folder(
+    folder_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Folder).where(
+            Folder.id == folder_id,
+            Folder.user_id == user.id,
+            Folder.project_id.is_(None),
+            Folder.is_deleted == True,
+        )
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found in trash")
+    folder_name = folder.name
+    await db.delete(folder)
+    await db.commit()
+    await _emit_event("FOLDER_PERMANENTLY_DELETED", {
+        "folder_id": folder_id,
+        "user_id": user.id,
+        "folder_name": folder_name,
+    })
+    return {"detail": "Folder permanently deleted"}
 
 from app.models import FolderPermission
 
@@ -2902,7 +3143,12 @@ async def share_folder(
     db: AsyncSession = Depends(get_db),
 ):
     # Verify folder ownership
-    query = select(Folder).where(Folder.id == folder_id, Folder.user_id == user.id)
+    query = select(Folder).where(
+        Folder.id == folder_id,
+        Folder.user_id == user.id,
+        Folder.project_id.is_(None),
+        Folder.is_deleted == False,
+    )
     folder = (await db.execute(query)).scalar_one_or_none()
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found or you don't have permission")

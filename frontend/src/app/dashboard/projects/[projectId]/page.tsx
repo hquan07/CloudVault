@@ -20,6 +20,10 @@ import { useAuth } from '@/lib/auth-context';
 
 type Tab = 'files' | 'trash' | 'members' | 'integrations' | 'operations' | 'policy' | 'activity';
 
+type ProjectTrashDragTarget =
+  | { type: 'file'; item: ProjectFile }
+  | { type: 'folder'; item: ProjectFolder };
+
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     const detail = error.data.detail;
@@ -54,6 +58,7 @@ export default function ProjectDetailPage() {
   const [operations, setOperations] = useState<ProjectOperationStatus | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [trash, setTrash] = useState<ProjectFile[]>([]);
+  const [trashFolders, setTrashFolders] = useState<ProjectFolder[]>([]);
   const [folders, setFolders] = useState<ProjectFolder[]>([]);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [folderPath, setFolderPath] = useState<ProjectFolder[]>([]);
@@ -81,6 +86,7 @@ export default function ProjectDetailPage() {
     sort_by: 'created_at', sort_order: 'desc',
   });
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
+  const [trashDragTarget, setTrashDragTarget] = useState<ProjectTrashDragTarget | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -100,6 +106,7 @@ export default function ProjectDetailPage() {
       setFolders(folderData.folders);
       setSelectedFileIds(new Set());
       setTrash(trashData.files);
+      setTrashFolders(trashData.folders || []);
       setMembers(memberData);
       setActivities(activityData.activities);
       if (projectData.member_role === 'admin') {
@@ -303,11 +310,63 @@ export default function ProjectDetailPage() {
   };
 
   const deleteFolder = async (folder: ProjectFolder) => {
-    if (!window.confirm(`Delete empty folder ${folder.name}?`)) return;
+    if (!window.confirm(`Move empty folder ${folder.name} to project trash?`)) return;
     try {
       await projectApi.deleteFolder(projectId, folder.id);
       setFolders((current) => current.filter((item) => item.id !== folder.id));
+      setTrashFolders((current) => [{
+        ...folder,
+        is_deleted: true,
+        deleted_at: new Date().toISOString(),
+      }, ...current]);
     } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const restoreFolder = async (folder: ProjectFolder) => {
+    try {
+      const restored = await projectApi.restoreFolder(projectId, folder.id);
+      setTrashFolders((current) => current.filter((item) => item.id !== folder.id));
+      if (restored.parent_id === currentFolderId) {
+        setFolders((current) => [restored, ...current]);
+      }
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const permanentlyDeleteFolder = async (folder: ProjectFolder) => {
+    if (!window.confirm(`Permanently delete folder ${folder.name}? This cannot be undone.`)) return;
+    try {
+      await projectApi.permanentlyDeleteFolder(projectId, folder.id);
+      setTrashFolders((current) => current.filter((item) => item.id !== folder.id));
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const handleItemDragStart = (
+    event: React.DragEvent,
+    target: ProjectTrashDragTarget,
+  ) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-cloudvault-project-item', JSON.stringify({
+      type: target.type,
+      id: target.item.id,
+    }));
+    setTrashDragTarget(target);
+  };
+
+  const handleTrashDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = trashDragTarget;
+    setTrashDragTarget(null);
+    if (!target) return;
+    if (target.type === 'folder') {
+      void deleteFolder(target.item);
+      return;
+    }
+    if (selectedFileIds.has(target.item.id) && selectedFileIds.size > 1) {
+      void bulkDeleteFiles();
+      return;
+    }
+    void deleteFile(target.item);
   };
 
   const moveFile = async (item: ProjectFile, destinationId: string) => {
@@ -575,7 +634,7 @@ export default function ProjectDetailPage() {
 
           {folders.length > 0 && (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {folders.map((folder) => <div key={folder.id} className="group flex items-center justify-between rounded-xl border border-gray-800 bg-gray-900 p-3 hover:border-cyan-500/30"><button onClick={() => openFolder(folder)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><span className="rounded-lg bg-cyan-500/10 p-2 text-cyan-400"><Folder size={18} /></span><span className="truncate text-sm font-medium text-gray-200">{folder.name}</span></button>{canWrite && <button onClick={() => void deleteFolder(folder)} title="Delete empty folder" className="rounded-lg p-2 text-gray-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"><Trash2 size={15} /></button>}</div>)}
+              {folders.map((folder) => <div key={folder.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'folder', item: folder })} onDragEnd={() => setTrashDragTarget(null)} className="group flex items-center justify-between rounded-xl border border-gray-800 bg-gray-900 p-3 hover:border-cyan-500/30"><button onClick={() => openFolder(folder)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><span className="rounded-lg bg-cyan-500/10 p-2 text-cyan-400"><Folder size={18} /></span><span className="truncate text-sm font-medium text-gray-200">{folder.name}</span></button>{canWrite && <button onClick={() => void deleteFolder(folder)} title="Move empty folder to trash" className="rounded-lg p-2 text-gray-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"><Trash2 size={15} /></button>}</div>)}
             </div>
           )}
 
@@ -620,7 +679,7 @@ export default function ProjectDetailPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-800">
                     {files.map((item) => (
-                      <tr key={item.id} className="hover:bg-gray-800/40">
+                      <tr key={item.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'file', item })} onDragEnd={() => setTrashDragTarget(null)} className="hover:bg-gray-800/40">
                         <td className="p-4"><div className="flex items-start gap-3"><input type="checkbox" checked={selectedFileIds.has(item.id)} onChange={() => toggleFileSelection(item.id)} className="mt-1 accent-cyan-500" /><div><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></div></div></td>
                         <td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td>
                         <td className="p-4 text-gray-400">{formatBytes(item.size)}</td>
@@ -641,13 +700,30 @@ export default function ProjectDetailPage() {
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
             Trashed files still count toward the project quota. Permanent deletion removes the stored object and releases its space.
           </div>
-          {trash.length === 0 ? (
+          {trash.length === 0 && trashFolders.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400">
               <Trash2 className="mx-auto mb-3 text-gray-600" size={42} />
               <p>Project trash is empty.</p>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
+            <div className="space-y-4">
+              {trashFolders.length > 0 && (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {trashFolders.map((folder) => (
+                    <div key={folder.id} className="flex items-center justify-between rounded-xl border border-red-500/20 bg-gray-900 p-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span className="rounded-lg bg-red-500/10 p-2 text-red-300"><Folder size={18} /></span>
+                        <div className="min-w-0"><div className="truncate text-sm font-medium text-gray-300 line-through">{folder.name}</div><div className="text-xs text-gray-600">Deleted {formatDate(folder.deleted_at)}</div></div>
+                      </div>
+                      <div className="flex gap-1">
+                        {canWrite && <button onClick={() => void restoreFolder(folder)} title="Restore folder" className="rounded-lg p-2 text-gray-400 hover:bg-emerald-500/10 hover:text-emerald-300"><RotateCcw size={17} /></button>}
+                        {isAdmin && <button onClick={() => void permanentlyDeleteFolder(folder)} title="Delete folder permanently" className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {trash.length > 0 && <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="border-b border-gray-800 text-xs uppercase text-gray-500">
@@ -668,6 +744,7 @@ export default function ProjectDetailPage() {
                   </tbody>
                 </table>
               </div>
+            </div>}
             </div>
           )}
         </section>
@@ -769,6 +846,23 @@ export default function ProjectDetailPage() {
           {project.status === 'active' && <form onSubmit={createAccount} className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="grid gap-4 lg:grid-cols-[1fr_180px_2fr_auto] lg:items-end"><label className="text-sm text-gray-300">Account name<input required name="name" minLength={2} placeholder="news-flow-worker" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><label className="text-sm text-gray-300">Expires (optional)<input name="expires_at" type="date" min={new Date().toISOString().slice(0, 10)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><fieldset><legend className="mb-2 text-sm text-gray-300">Scopes</legend><div className="flex flex-wrap gap-3">{['files:create', 'files:read', 'files:delete', 'project:usage:read'].map((scope) => <label key={scope} className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" name="scopes" value={scope} defaultChecked={scope !== 'files:delete'} className="accent-cyan-500" />{scope}</label>)}</div></fieldset><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><KeyRound size={17} /> Create token</button></div></form>}
           <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{accounts.length === 0 ? <div className="p-10 text-center text-gray-500">No service accounts.</div> : accounts.map((account) => <div key={account.id} className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex items-center gap-2"><span className="font-medium text-white">{account.name}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${account.is_active ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>{account.is_active ? 'active' : 'revoked'}</span></div><div className="mt-1 font-mono text-xs text-gray-500">{account.token_prefix ? `${account.token_prefix}…` : 'No active credential'} · last used {formatDate(account.last_used_at)} · expires {formatDate(account.expires_at)}</div><div className="mt-2 flex flex-wrap gap-1">{account.scopes.map((scope) => <span key={scope} className="rounded bg-gray-800 px-2 py-1 text-[10px] text-gray-400">{scope}</span>)}</div></div><div className="flex gap-2">{project.status === 'active' && <button onClick={() => void rotateAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Rotate</button>}{account.is_active && <button onClick={() => void revokeAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/20 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Revoke</button>}</div></div>)}</div></div>
         </section>
+      )}
+
+      {trashDragTarget && canWrite && (
+        <div
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = 'move';
+          }}
+          onDrop={handleTrashDrop}
+          className="fixed bottom-8 right-8 z-50 flex min-w-64 items-center gap-3 rounded-2xl border-2 border-dashed border-red-400 bg-gray-950/95 px-6 py-5 text-red-300 shadow-2xl shadow-red-950/50"
+          role="region"
+          aria-label="Drop item to move it to project trash"
+        >
+          <span className="rounded-xl bg-red-500/15 p-3"><Trash2 size={28} /></span>
+          <span><strong className="block text-white">Move to project trash</strong><span className="text-sm text-red-300/80">Drop {trashDragTarget.type} here</span></span>
+        </div>
       )}
 
       {showDelete && (

@@ -30,8 +30,16 @@ export interface FolderItem {
   parent_id: string | null;
   path: string;
   depth: number;
+  is_deleted?: boolean;
+  deleted_at?: string | null;
   created_at: string;
 }
+
+type TrashDragTarget =
+  | { type: 'file'; item: FileItem }
+  | { type: 'folder'; item: FolderItem };
+
+const INTERNAL_DRAG_TYPE = 'application/x-cloudvault-item';
 
 type UploadTask = {
   id: string;
@@ -85,6 +93,8 @@ export default function DrivePage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
+  const [folderDeleteTarget, setFolderDeleteTarget] = useState<FolderItem | null>(null);
+  const [trashDragTarget, setTrashDragTarget] = useState<TrashDragTarget | null>(null);
 
   // Drag & Drop / Dropdown states
   const [isDragActive, setIsDragActive] = useState(false);
@@ -302,6 +312,50 @@ export default function DrivePage() {
     }
   };
 
+  const confirmFolderDelete = async () => {
+    if (!folderDeleteTarget) return;
+    setBulkBusy(true);
+    setError('');
+    try {
+      await fileApi.deleteFolder(folderDeleteTarget.id);
+      setFolders(current => current.filter(folder => folder.id !== folderDeleteTarget.id));
+      refreshUser();
+    } catch (err: any) {
+      setError(err.message || 'Folder could not be moved to Trash');
+    } finally {
+      setBulkBusy(false);
+      setFolderDeleteTarget(null);
+    }
+  };
+
+  const handleItemDragStart = (event: React.DragEvent, target: TrashDragTarget) => {
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(INTERNAL_DRAG_TYPE, JSON.stringify({
+      type: target.type,
+      id: target.item.id,
+    }));
+    setTrashDragTarget(target);
+    setIsDragActive(false);
+  };
+
+  const handleTrashDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = trashDragTarget;
+    setTrashDragTarget(null);
+    if (!target) return;
+    if (target.type === 'folder') {
+      setFolderDeleteTarget(target.item);
+      return;
+    }
+    setDeleteTargets(
+      selectedIds.has(target.item.id) && selectedIds.size > 1
+        ? [...selectedIds]
+        : [target.item.id],
+    );
+  };
+
   const handleNavigate = (folder: FolderItem) => {
     setCurrentFolderId(folder.id);
     setFolderPath([...folderPath, { id: folder.id, name: folder.name }]);
@@ -317,11 +371,13 @@ export default function DrivePage() {
   // Drag & Drop Handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
     setIsDragActive(true);
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
+    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
     // Prevent flickering when dragging over child elements
     if (e.currentTarget.contains(e.relatedTarget as Node)) return;
     setIsDragActive(false);
@@ -329,6 +385,7 @@ export default function DrivePage() {
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
+    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
     setIsDragActive(false);
     
     const items = e.dataTransfer.items;
@@ -520,6 +577,9 @@ export default function DrivePage() {
                 exit={{ opacity: 0, scale: 0.9 }}
                 layout
                 key={folder.id} 
+                draggable
+                onDragStartCapture={(event) => handleItemDragStart(event, { type: 'folder', item: folder })}
+                onDragEndCapture={() => setTrashDragTarget(null)}
                 className={`group bg-gray-900 border border-gray-700 p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4 ${viewMode === 'grid' ? 'rounded-2xl' : 'rounded-xl'}`}
               onClick={() => handleNavigate(folder)}
               onContextMenu={(e) => handleContextMenu(e, folder, 'folder')}
@@ -550,6 +610,9 @@ export default function DrivePage() {
               exit={{ opacity: 0, scale: 0.9 }}
               layout
               key={file.id} 
+              draggable
+              onDragStartCapture={(event) => handleItemDragStart(event, { type: 'file', item: file })}
+              onDragEndCapture={() => setTrashDragTarget(null)}
               className={`group relative bg-gray-900 border p-5 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${selectedIds.has(file.id) ? 'border-cyan-500 ring-1 ring-cyan-500/40' : 'border-gray-800 hover:border-cyan-500/30'} ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
               onClick={() => selectedIds.size > 0 ? toggleSelection(file.id) : setPreviewFile(file)}
               onContextMenu={(e) => handleContextMenu(e, file, 'file')}
@@ -650,6 +713,21 @@ export default function DrivePage() {
         </div>
       )}
 
+      {folderDeleteTarget && (
+        <div className="fixed inset-0 z-[1100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={() => !bulkBusy && setFolderDeleteTarget(null)} />
+          <div role="dialog" aria-modal="true" aria-labelledby="folder-delete-title" className="relative w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 p-6 shadow-2xl">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-500/15 text-red-400"><AlertTriangle size={24} /></div>
+            <h3 id="folder-delete-title" className="text-xl font-semibold text-white">Move folder to Trash?</h3>
+            <p className="mt-2 text-sm text-gray-400"><strong className="text-gray-200">{folderDeleteTarget.name}</strong> will be recoverable from Trash. Only empty folders can be moved.</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button disabled={bulkBusy} onClick={() => setFolderDeleteTarget(null)} className="rounded-xl bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-200 hover:bg-gray-700 disabled:opacity-50">Cancel</button>
+              <button disabled={bulkBusy} onClick={confirmFolderDelete} className="flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">{bulkBusy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} Move to Trash</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Context Menu */}
       {contextMenu && (
         <div 
@@ -694,6 +772,25 @@ export default function DrivePage() {
 
       {/* Drag overlay */}
       <AnimatePresence>
+        {trashDragTarget && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = 'move';
+            }}
+            onDrop={handleTrashDrop}
+            className="fixed bottom-8 right-8 z-[1050] flex min-w-64 items-center gap-3 rounded-2xl border-2 border-dashed border-red-400 bg-gray-950/95 px-6 py-5 text-red-300 shadow-2xl shadow-red-950/50"
+            role="region"
+            aria-label="Drop item to move it to Trash"
+          >
+            <span className="rounded-xl bg-red-500/15 p-3"><Trash2 size={28} /></span>
+            <span><strong className="block text-white">Move to Trash</strong><span className="text-sm text-red-300/80">Drop {trashDragTarget.type} here</span></span>
+          </motion.div>
+        )}
         {isDragActive && (
           <motion.div 
             initial={{ opacity: 0 }}

@@ -310,6 +310,15 @@ export const fileApi = {
   restore: (fileId: string) =>
     request(`${FILE_BASE}/files/${fileId}/restore`, { method: 'POST' }),
 
+  deleteFolder: (folderId: string) =>
+    request(`${FILE_BASE}/folders/${folderId}`, { method: 'DELETE' }),
+
+  restoreFolder: (folderId: string) =>
+    request(`${FILE_BASE}/folders/${folderId}/restore`, { method: 'POST' }),
+
+  permanentlyDeleteFolder: (folderId: string) =>
+    request(`${FILE_BASE}/folders/${folderId}/permanent`, { method: 'DELETE' }),
+
   copy: (fileId: string, folderId?: string) =>
     request(`${FILE_BASE}/files/${fileId}/copy`, {
       method: 'POST', body: JSON.stringify({ folder_id: folderId }),
@@ -406,6 +415,8 @@ export interface ProjectFolder {
   parent_id: string | null;
   path: string;
   depth: number;
+  is_deleted: boolean;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -548,7 +559,7 @@ export const projectApi = {
   },
 
   listTrash: (projectId: string) =>
-    request<{ files: ProjectFile[]; limit: number; offset: number }>(
+    request<{ files: ProjectFile[]; folders: ProjectFolder[]; limit: number; offset: number }>(
       `${FILE_BASE}/projects/${projectId}/files/trash`
     ),
 
@@ -757,6 +768,16 @@ export const projectApi = {
 
   deleteFolder: (projectId: string, folderId: string) =>
     request<{ detail: string }>(`${FILE_BASE}/projects/${projectId}/folders/${folderId}`, {
+      method: 'DELETE',
+    }),
+
+  restoreFolder: (projectId: string, folderId: string) =>
+    request<ProjectFolder>(`${FILE_BASE}/projects/${projectId}/folders/${folderId}/restore`, {
+      method: 'POST',
+    }),
+
+  permanentlyDeleteFolder: (projectId: string, folderId: string) =>
+    request<{ detail: string }>(`${FILE_BASE}/projects/${projectId}/folders/${folderId}/permanent`, {
       method: 'DELETE',
     }),
 
