@@ -56,6 +56,14 @@ class ProjectMembership(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
+class ProjectFileStar(Base):
+    __tablename__ = "project_file_stars"
+
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    file_id = Column(String(36), ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class ServiceAccount(Base):
     __tablename__ = "service_accounts"
 
@@ -190,6 +198,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    event_id = Column(String(36), nullable=True, unique=True, index=True)
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
     service_account_id = Column(String(36), ForeignKey("service_accounts.id", ondelete="SET NULL"), nullable=True)

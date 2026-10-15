@@ -124,6 +124,29 @@ flowchart TD
     Meta --> Jaeger
 ```
 
+### Deployment profiles and failure boundaries
+
+The default Compose profile favors local development and runs one Kafka broker,
+one standalone MinIO node and one replica per application workload. The
+optional `docker-compose.ha.yml` overlay keeps the same routes and trust
+boundaries while providing:
+
+- three ZooKeeper nodes and three Kafka brokers, topic replication factor 3,
+  `min.insync.replicas=2` and disabled unclean leader election;
+- four MinIO nodes/drives using erasure coding and HA-only volumes;
+- multiple stateless frontend/API replicas behind the existing Nginx service;
+- multiple instances of each Kafka worker within its existing consumer group;
+  and
+- per-replica database-pool limits so the aggregate remains operator-controlled.
+
+Migration, bucket initialization and Project Operations remain singleton jobs.
+MySQL, Redis and Elasticsearch are not made highly available by this overlay,
+and Nginx remains a single gateway. The profile therefore removes important
+Kafka, object-storage and worker bottlenecks but is not a complete multi-host
+production control plane. The mandatory `CLOUDVAULT_HA_MODE_ACK` guard exists
+because standalone and distributed MinIO use incompatible storage layouts;
+operators must back up and plan object migration before enabling the overlay.
+
 ### API ownership
 
 | Component | Primary responsibilities |
@@ -131,25 +154,80 @@ flowchart TD
 | Nginx | Host entry point, UI/API/WebSocket routing, request limits and project route dispatch |
 | Auth Service | Users, JWT lifecycle, admin APIs, projects, membership, project policy, project lifecycle and service accounts |
 | File Service | Personal/project folders and files, streamed object I/O, versions, idempotency, quota reservation, trash and project operation status |
-| Metadata Service | Metadata views, sharing, activity, Elasticsearch queries and authenticated WebSocket delivery |
+| Metadata Service | Metadata views, sharing, user-scoped analytics, activity, Elasticsearch queries and authenticated WebSocket delivery |
 
 Project routes are intentionally split. Nginx sends project lifecycle,
 membership and service-account requests to Auth Service, while project file,
 folder, usage and operation-status requests go to File Service.
+
+### Frontend scope and analytics
+
+- Dashboard navigation uses the same destination list on desktop and in the
+  accessible mobile drawer. `Integrations` and `Health / Operations` remain
+  nested in project detail because their credentials, quota and reconciliation
+  state belong to exactly one project boundary.
+- The Analytics page calls `GET /api/v1/analytics/stats` through Nginx. Metadata
+  Service combines the caller's personal files with only projects visible to
+  that caller; a system administrator can inspect all project storage.
+- Analytics summary cards and charts are computed from MySQL file/share/star
+  state. API failure produces an explicit unavailable or stale-snapshot state,
+  never fallback demonstration data.
+- Global search accepts a single `project_id`. Metadata Service verifies the
+  project and membership before querying Elasticsearch or the MySQL fallback;
+  omitting the parameter searches personal files only.
 
 ## 3. Identity and Authorization
 
 ### Browser users
 
 1. Auth Service verifies credentials against MySQL.
-2. It issues a short-lived access JWT and a refresh token whose hash is stored in
-   MySQL.
-3. Refresh tokens rotate when used. Logout revokes the refresh token and stores
-   the access-token `jti` in Redis for its remaining lifetime.
-4. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
+2. It issues a short-lived access JWT carrying the logical session ID and a
+   refresh token whose hash is stored in MySQL together with client IP, user
+   agent, session start and last-renewal timestamps.
+3. Refresh tokens rotate atomically under a row lock. Reuse of an already
+   revoked refresh token is treated as replay and revokes all remaining refresh
+   sessions for that user.
+4. Logout revokes the current refresh token and stores the access-token `jti` in
+   Redis for its remaining lifetime. Password changes revoke every refresh
+   session and blacklist the current access token.
+5. Users can inspect recent security events, identify the current device and
+   revoke one or all refresh sessions from Account Settings. Revoking the
+   current session also blacklists its access-token `jti` immediately.
+6. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
    and inactive users.
-5. Project access additionally requires system-admin status or project
+7. Project access additionally requires system-admin status or project
    membership with the required `viewer`, `editor` or `admin` role.
+
+Registration requires passwords of at least 12 characters. Authentication
+abuse protection is layered: Nginx limits requests per source address, while
+Auth Service applies configurable Redis-backed limits per client/identity pair.
+The application limiter fails open if Redis is unavailable so the gateway
+remains the outer protection. Login, logout, refresh replay, password and
+session-revocation actions are written to the security audit trail.
+
+Optional TOTP MFA is activated only after the user proves the current password
+and verifies a code from an authenticator application. Authenticator secrets
+are encrypted at rest; recovery codes are returned once and stored only as
+hashes. Disabling MFA revokes all refresh sessions and blacklists the current
+access token. Account preferences are browser-local and never change project
+authorization or retention policy.
+
+Account deletion is a delayed lifecycle rather than a direct `DELETE users`:
+
+1. Auth Service reports personal storage, sessions, shares, project memberships,
+   service-account provenance and owned projects.
+2. Administrator accounts are excluded from self-service deletion. A `user`
+   account must transfer every owned project to another active project
+   administrator before it can schedule deletion.
+3. Password and MFA confirmation moves the account to `pending`, revokes refresh
+   sessions, blacklists the current access token and starts a configurable
+   seven-day cancellation window.
+4. The account-deletion worker claims due requests under a row lock, aborts
+   pending project uploads, deletes personal MinIO objects before metadata,
+   removes access/share records and anonymizes the retained user identity.
+5. Files and service credentials belonging to projects remain with those
+   projects. Project upload attribution and audit history are retained without
+   the deleted user's PII.
 
 ### Project applications
 
@@ -226,20 +304,33 @@ sequenceDiagram
 5. Metadata Service sends activity notifications over an authenticated
    WebSocket after Redis Pub/Sub delivery.
 
+The browser authenticates notification WebSockets in the first frame after the
+handshake. Access tokens are never placed in WebSocket query strings, preventing
+them from appearing in gateway/Uvicorn access logs, browser history or copied
+URLs.
+
 The frontend API client does not bypass Nginx. It calls same-origin gateway
 routes, and Nginx selects the backend service.
 
 ### Kafka event flow
 
-1. File Service publishes supported `file-events`. The `user-events` topic is
-   provisioned for compatible event producers, but current project lifecycle
-   audit writes do not depend on it.
+1. File Service publishes versioned events with a stable event ID and ordering
+   key. Its producer enables idempotence and waits for all in-sync replicas.
+   The `user-events` topic is provisioned for compatible event producers, but
+   current project lifecycle audit writes do not depend on it.
 2. Audit Logger, ZIP Extractor, Thumbnail Worker and Search Indexer use separate
    consumer groups so each can process the same event independently.
 3. Notification Relay runs inside Metadata Service with the
    `metadata-notifications` consumer group and publishes user activity to Redis.
 4. Metadata Service subscribes to the per-user Redis channel and pushes events
    over WebSocket.
+
+Consumers disable automatic offset commits. A message is committed only after
+its side effect succeeds; failures use bounded retry/backoff and then publish
+the original context to `dead-letter-events` so the partition can continue.
+Audit and ZIP processing persist event IDs to make redelivery idempotent.
+Kafka still provides at-least-once delivery: every new consumer must make its
+own external side effects idempotent before it is scaled horizontally.
 
 Audit ownership is split deliberately:
 
@@ -283,6 +374,12 @@ The worker exports Prometheus metrics on internal port `9100`. Prometheus
 evaluates quota, drift, object-integrity, stale-upload and worker-health rules;
 Grafana visualizes them and Alertmanager receives firing alerts.
 
+`account-deletion-worker` is a separate periodic controller on internal port
+`9101`. It retries failed purges with backoff and exports pending, failed,
+completed and error metrics. A failed purge leaves the account locked and raises
+an Alertmanager signal; operators retry through the worker instead of manually
+deleting database rows or MinIO objects.
+
 Reconciliation repair and retention deletion are opt-in. The safe rollout is:
 
 1. observe metrics and run retention in dry-run mode;
@@ -305,8 +402,10 @@ Operational scripts live in `scripts/operations/`:
 The MySQL image runs the baseline schema for a new volume. The one-shot
 `mysql-migrate` service waits for MySQL health and applies ordered, idempotent
 migrations before API services start. Project migrations add project ownership,
-service accounts, audit context, folders, per-user stars/pins and project
-operation status without changing existing personal ownership.
+service accounts, audit context, folders, per-user stars/pins, project operation
+status, event-delivery deduplication, refresh-session activity metadata and TOTP
+MFA state without changing existing personal ownership. Migrations `002`
+through `013` are applied in order.
 
 Database and object storage must be backed up together. Restoring only MySQL or
 only MinIO can leave valid metadata without objects, or objects without a
@@ -330,6 +429,10 @@ flowchart LR
 
 - Nginx is publicly bound by default; direct application and administration
   ports bind to loopback.
+- Nginx applies endpoint-specific limits to login, registration, token refresh
+  and public-share access, returns JSON `429` responses, propagates a request ID
+  and adds baseline CSP, framing, MIME-sniffing, referrer and permissions
+  headers. TLS deployments should add HSTS only after HTTPS is enforced.
 - Persistence, cache, search and messaging services do not publish host ports,
   except MinIO's loopback-only administration endpoints.
 - `cloudvault-shared` contains Nginx and explicitly selected uploader services,
@@ -338,6 +441,11 @@ flowchart LR
   and least-privilege application users.
 - Redis, MinIO and Grafana require configured credentials. Compose rejects
   missing required secrets.
+- Direct-development CORS is an explicit `CORS_ALLOWED_ORIGINS` list; normal UI
+  traffic stays same-origin through Nginx.
+- Frontend, API and worker containers run as non-root users with all Linux
+  capabilities dropped and `no-new-privileges` enabled. API and periodic-worker
+  source mounts are read-only; production code changes require an image rebuild.
 - TLS should terminate at Nginx or a trusted upstream proxy in production.
 
 ## 10. Health and Observability Semantics

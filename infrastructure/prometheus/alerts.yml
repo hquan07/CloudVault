@@ -106,3 +106,23 @@ groups:
         annotations:
           summary: "Reconciliation project đã quá hạn"
           description: "Không có chu kỳ reconciliation thành công trong hơn 15 phút."
+
+  - name: cloudvault-account-deletion
+    rules:
+      - alert: CloudVaultAccountDeletionWorkerDown
+        expr: absent(up{job="account-deletion-worker"} == 1) or up{job="account-deletion-worker"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Account deletion worker không hoạt động"
+          description: "Prometheus không thu được metrics từ worker xóa tài khoản trong 5 phút."
+
+      - alert: CloudVaultAccountDeletionFailed
+        expr: cloudvault_account_deletion_failed > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Có yêu cầu xóa tài khoản bị lỗi"
+          description: "Có {{ $value }} yêu cầu cần operator kiểm tra hoặc retry; tài khoản vẫn bị khóa để bảo vệ dữ liệu."

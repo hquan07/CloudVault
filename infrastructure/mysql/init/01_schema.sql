@@ -22,13 +22,22 @@ CREATE TABLE IF NOT EXISTS users (
     role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_secret_encrypted VARCHAR(1000),
+    mfa_recovery_codes JSON,
+    deletion_status ENUM('active', 'pending', 'purging', 'failed', 'deleted') NOT NULL DEFAULT 'active',
+    deletion_requested_at TIMESTAMP NULL,
+    deletion_scheduled_at TIMESTAMP NULL,
+    deletion_completed_at TIMESTAMP NULL,
+    anonymized_at TIMESTAMP NULL,
     last_login_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     
     INDEX idx_users_email (email),
     INDEX idx_users_username (username),
-    INDEX idx_users_oauth (oauth_provider, oauth_id)
+    INDEX idx_users_oauth (oauth_provider, oauth_id),
+    INDEX idx_users_deletion_status (deletion_status, deletion_scheduled_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
@@ -43,11 +52,14 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     revoked_at TIMESTAMP NULL,
     user_agent VARCHAR(500),
     ip_address VARCHAR(45),
+    session_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
     INDEX idx_refresh_tokens_user (user_id),
     INDEX idx_refresh_tokens_hash (token_hash),
     INDEX idx_refresh_tokens_expires (expires_at),
+    INDEX idx_refresh_tokens_active (user_id, revoked, expires_at),
     CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id) 
         REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -66,7 +78,7 @@ CREATE TABLE IF NOT EXISTS projects (
     max_file_size BIGINT NOT NULL,
     warning_percent TINYINT UNSIGNED NOT NULL DEFAULT 80,
     retention_policy JSON,
-    created_by CHAR(36) NOT NULL,
+    created_by CHAR(36),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -116,7 +128,26 @@ CREATE TABLE IF NOT EXISTS service_accounts (
     CONSTRAINT fk_service_accounts_project FOREIGN KEY (project_id)
         REFERENCES projects(id) ON DELETE CASCADE,
     CONSTRAINT fk_service_accounts_created_by FOREIGN KEY (created_by)
-        REFERENCES users(id) ON DELETE RESTRICT
+        REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS account_deletion_requests (
+    id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+    user_id CHAR(36) NOT NULL,
+    status ENUM('scheduled', 'purging', 'completed', 'cancelled', 'failed') NOT NULL DEFAULT 'scheduled',
+    execute_after TIMESTAMP NOT NULL,
+    attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
+    last_error VARCHAR(1000),
+    started_at TIMESTAMP NULL,
+    completed_at TIMESTAMP NULL,
+    cancelled_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE INDEX uq_account_deletion_user (user_id),
+    INDEX idx_account_deletion_due (status, execute_after),
+    CONSTRAINT fk_account_deletion_user FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
@@ -247,6 +278,15 @@ CREATE TABLE IF NOT EXISTS project_uploads (
     idempotency_key VARCHAR(255) NOT NULL,
     checksum_sha256 CHAR(64) NOT NULL,
     object_key VARCHAR(1024),
+    multipart_upload_id VARCHAR(255),
+    upload_kind VARCHAR(20) NOT NULL DEFAULT 'proxy',
+    original_name VARCHAR(255),
+    mime_type VARCHAR(255),
+    file_size BIGINT,
+    folder_id CHAR(36),
+    metadata_json JSON,
+    part_size BIGINT,
+    part_count INT,
     reserved_bytes BIGINT NOT NULL DEFAULT 0,
     status ENUM('PENDING', 'AVAILABLE', 'FAILED') NOT NULL DEFAULT 'PENDING',
     error_code VARCHAR(64),
@@ -262,6 +302,8 @@ CREATE TABLE IF NOT EXISTS project_uploads (
         REFERENCES service_accounts(id) ON DELETE SET NULL,
     CONSTRAINT fk_project_uploads_user FOREIGN KEY (user_id)
         REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_project_uploads_folder FOREIGN KEY (folder_id)
+        REFERENCES folders(id) ON DELETE SET NULL,
     CONSTRAINT fk_project_uploads_file FOREIGN KEY (file_id)
         REFERENCES files(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -312,6 +354,7 @@ CREATE TABLE IF NOT EXISTS shared_links (
 -- ============================================
 CREATE TABLE IF NOT EXISTS audit_logs (
     id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+    event_id CHAR(36),
     user_id CHAR(36),
     project_id CHAR(36),
     service_account_id CHAR(36),
@@ -321,9 +364,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
         'FILE_MOVED', 'FILE_COPIED', 'FILE_SHARED', 'FILE_VERSIONED',
         'FOLDER_CREATED', 'FOLDER_DELETED', 'FOLDER_RENAMED',
         'SHARE_CREATED', 'SHARE_ACCESSED', 'SHARE_REVOKED',
-        'PASSWORD_CHANGED', 'QUOTA_EXCEEDED'
+        'PASSWORD_CHANGED', 'QUOTA_EXCEEDED',
+        'USER_LOGIN_FAILED', 'SESSION_REVOKED', 'SESSIONS_REVOKED',
+        'REFRESH_TOKEN_REPLAYED', 'MFA_ENABLED', 'MFA_DISABLED',
+        'MFA_RECOVERY_USED',
+        'PROJECT_CREATED', 'PROJECT_UPDATED', 'PROJECT_ARCHIVED',
+        'PROJECT_RESTORED', 'PROJECT_DELETED', 'PROJECT_PINNED', 'PROJECT_UNPINNED',
+        'PROJECT_OWNERSHIP_TRANSFERRED', 'ACCOUNT_DELETION_REQUESTED',
+        'ACCOUNT_DELETION_CANCELLED', 'ACCOUNT_DELETION_COMPLETED',
+        'ACCOUNT_DELETION_FAILED'
     ) NOT NULL,
-    resource_type ENUM('user', 'file', 'folder', 'share') NOT NULL,
+    resource_type ENUM('user', 'file', 'folder', 'share', 'project') NOT NULL,
     resource_id CHAR(36),
     ip_address VARCHAR(45),
     user_agent VARCHAR(500),
@@ -336,12 +387,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     INDEX idx_audit_action (action),
     INDEX idx_audit_resource (resource_type, resource_id),
     INDEX idx_audit_created (created_at),
+    UNIQUE INDEX uq_audit_event (event_id),
     CONSTRAINT fk_audit_user FOREIGN KEY (user_id) 
         REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT fk_audit_project FOREIGN KEY (project_id)
         REFERENCES projects(id) ON DELETE SET NULL,
     CONSTRAINT fk_audit_service_account FOREIGN KEY (service_account_id)
         REFERENCES service_accounts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- WORKER EVENT IDEMPOTENCY TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS worker_processed_events (
+    consumer_group VARCHAR(100) NOT NULL,
+    event_id CHAR(36) NOT NULL,
+    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (consumer_group, event_id),
+    INDEX idx_worker_events_processed (processed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

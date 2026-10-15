@@ -13,15 +13,21 @@ interface User {
   username: string;
   avatar_url: string | null;
   role: 'user' | 'admin';
+  is_active: boolean;
+  is_verified: boolean;
+  mfa_enabled: boolean;
+  deletion_status: 'active' | 'pending' | 'purging' | 'failed' | 'deleted';
+  oauth_provider: 'local' | 'google' | 'github';
   storage_quota: number;
   storage_used: number;
+  last_login_at: string | null;
   created_at: string;
 }
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, otpCode?: string) => Promise<void>;
   register: (email: string, username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -49,8 +55,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refreshUser().finally(() => setLoading(false));
   }, [refreshUser]);
 
-  const login = async (email: string, password: string) => {
-    const data = await authApi.login({ email, password }) as {
+  const login = async (email: string, password: string, otpCode?: string) => {
+    const data = await authApi.login({ email, password, otp_code: otpCode }) as {
       tokens: { access_token: string; refresh_token: string };
       user: User;
     };

@@ -1,0 +1,3 @@
+pymysql==1.1.1
+minio==7.2.12
+prometheus-client==0.21.1

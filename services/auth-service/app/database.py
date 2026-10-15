@@ -9,9 +9,10 @@ from app.config import settings
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    pool_size=20,
-    max_overflow=10,
-    pool_recycle=3600,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+    pool_pre_ping=True,
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

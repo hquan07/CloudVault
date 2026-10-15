@@ -9,9 +9,10 @@ import os
 import uuid
 import logging
 
-from aiokafka import AIOKafkaConsumer
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
+
+from common.reliable_kafka import build_consumer, consume_reliably
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [AuditLogger] %(message)s")
 logger = logging.getLogger(__name__)
@@ -70,61 +71,62 @@ async def main():
     engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    consumer = AIOKafkaConsumer(
-        *TOPICS,
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        group_id="audit-logger",
-        auto_offset_reset="earliest",
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    )
-    await consumer.start()
-    logger.info(f"Consuming from {TOPICS}...")
+    async def handle_event(data: dict) -> None:
+        event = data.get("event", "")
+        action = EVENT_TO_ACTION.get(event)
+        if not action:
+            return
 
-    try:
-        async for msg in consumer:
-            data = msg.value
-            event = data.get("event", "")
-            action = EVENT_TO_ACTION.get(event)
-            if not action:
-                continue
+        resource_type = EVENT_TO_RESOURCE.get(event, "file")
+        resource_id = (
+            data.get("file_id")
+            or data.get("folder_id")
+            or data.get("project_id")
+            or data.get("user_id")
+        )
+        user_id = data.get("user_id")
+        event_id = data["event_id"]
 
-            resource_type = EVENT_TO_RESOURCE.get(event, "file")
-            resource_id = (
-                data.get("file_id")
-                or data.get("folder_id")
-                or data.get("project_id")
-                or data.get("user_id")
+        async with session_factory() as session:
+            result = await session.execute(
+                text("""
+                    INSERT INTO audit_logs (
+                        id, event_id, user_id, project_id, service_account_id,
+                        action, resource_type, resource_id, details_json
+                    )
+                    VALUES (
+                        :id, :event_id, :user_id, :project_id, :service_account_id,
+                        :action, :resource_type, :resource_id, :details
+                    )
+                    ON DUPLICATE KEY UPDATE event_id = VALUES(event_id)
+                """),
+                {
+                    "id": str(uuid.uuid4()),
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "project_id": data.get("project_id"),
+                    "service_account_id": data.get("service_account_id"),
+                    "action": action,
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "details": json.dumps(data),
+                },
             )
-            user_id = data.get("user_id")
+            await session.commit()
+            if result.rowcount == 1:
+                logger.info("Logged event %s: %s on %s", event_id, action, resource_id)
+            else:
+                logger.info("Skipped duplicate audit event %s", event_id)
 
-            async with session_factory() as session:
-                await session.execute(
-                    text("""
-                        INSERT INTO audit_logs (
-                            id, user_id, project_id, service_account_id,
-                            action, resource_type, resource_id, details_json
-                        )
-                        VALUES (
-                            :id, :user_id, :project_id, :service_account_id,
-                            :action, :resource_type, :resource_id, :details
-                        )
-                    """),
-                    {
-                        "id": str(uuid.uuid4()),
-                        "user_id": user_id,
-                        "project_id": data.get("project_id"),
-                        "service_account_id": data.get("service_account_id"),
-                        "action": action,
-                        "resource_type": resource_type,
-                        "resource_id": resource_id,
-                        "details": json.dumps(data),
-                    },
-                )
-                await session.commit()
-                logger.info(f"Logged: {action} by {user_id} on {resource_id}")
-
+    consumer = build_consumer(*TOPICS, group_id="audit-logger")
+    try:
+        await consume_reliably(
+            consumer,
+            handle_event,
+            group_id="audit-logger",
+            logger=logger,
+        )
     finally:
-        await consumer.stop()
         await engine.dispose()
 
 

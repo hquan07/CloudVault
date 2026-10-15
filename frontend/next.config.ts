@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  poweredByHeader: false,
+
   // Allow external images (MinIO thumbnails, avatars)
   images: {
     remotePatterns: [

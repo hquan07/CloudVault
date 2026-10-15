@@ -13,12 +13,13 @@ from datetime import datetime
 class RegisterRequest(BaseModel):
     email: EmailStr
     username: str = Field(..., min_length=3, max_length=100)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    otp_code: Optional[str] = Field(None, min_length=6, max_length=32)
 
 
 class RefreshRequest(BaseModel):
@@ -30,6 +31,39 @@ class UpdateProfileRequest(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
+
+
+class MfaSetupRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=32)
+
+
+class MfaDisableRequest(MfaCodeRequest):
+    current_password: str = Field(..., min_length=1, max_length=128)
+
+
+class ProjectTransferOwnershipRequest(BaseModel):
+    new_owner_user_id: str = Field(..., min_length=36, max_length=36)
+
+
+class AccountDeletionRequestCreate(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    confirmation: str = Field(..., min_length=1, max_length=255)
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=32)
+
+
+class AccountDeletionCancelRequest(BaseModel):
+    email: EmailStr
+    current_password: str = Field(..., min_length=1, max_length=128)
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=32)
+
+
 # ── Response Schemas ──
 
 class UserResponse(BaseModel):
@@ -39,8 +73,13 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str] = None
     role: str
     is_active: bool
+    is_verified: bool
+    mfa_enabled: bool
+    deletion_status: str
+    oauth_provider: str
     storage_quota: int
     storage_used: int
+    last_login_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
@@ -72,6 +111,61 @@ class MeResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class SessionResponse(BaseModel):
+    id: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: datetime
+    session_started_at: datetime
+    last_active_at: datetime
+    expires_at: datetime
+    is_current: bool = False
+
+
+class SecurityEventResponse(BaseModel):
+    id: str
+    action: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: datetime
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaEnableResponse(BaseModel):
+    detail: str
+    recovery_codes: list[str]
+
+
+class OwnedProjectSummary(BaseModel):
+    id: str
+    slug: str
+    name: str
+
+
+class AccountDeletionImpactResponse(BaseModel):
+    deletion_status: str
+    can_delete: bool
+    blockers: list[str]
+    personal_file_count: int
+    personal_storage_bytes: int
+    owned_projects: list[OwnedProjectSummary]
+    project_membership_count: int
+    active_shared_link_count: int
+    active_session_count: int
+    created_service_account_count: int
+    scheduled_for: Optional[datetime] = None
+
+
+class AccountDeletionStatusResponse(BaseModel):
+    detail: str
+    status: str
+    scheduled_for: Optional[datetime] = None
 
 
 class ProjectCreateRequest(BaseModel):
@@ -115,6 +209,12 @@ class ProjectMembershipResponse(BaseModel):
     username: str
     email: str
     created_at: datetime
+
+
+class ProjectMemberCandidateResponse(BaseModel):
+    id: str
+    username: str
+    email: str
 
 
 class ProjectResponse(BaseModel):

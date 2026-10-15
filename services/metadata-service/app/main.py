@@ -19,9 +19,12 @@ Endpoints matching the frontend api.ts contract:
 """
 
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging
+import os
+import uuid
 
 import bcrypt
 from minio import Minio
@@ -44,8 +47,9 @@ from app.dependencies import (
 )
 from app.models import (
     User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily,
-    FolderPermission, Project, ProjectMembership,
+    FolderPermission, Project, ProjectFileStar, ProjectMembership,
 )
+from app.analytics import build_storage_growth, build_upload_activity, summarize_file_types
 
 # ── Elasticsearch & Redis clients ──
 es_client: AsyncElasticsearch | None = None
@@ -60,12 +64,14 @@ minio_public_client = Minio(
 
 
 
-from aiokafka import AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from aiokafka.structs import TopicPartition
 from app.database import async_session
 import json
 import asyncio
 
 notification_consumer_task = None
+logger = logging.getLogger(__name__)
 
 async def notification_worker():
     """Forward domain events to Redis; audit persistence is owned by audit-logger."""
@@ -73,34 +79,92 @@ async def notification_worker():
         settings.KAFKA_TOPIC_FILE_EVENTS,
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
         group_id="metadata-notifications",
+        client_id=f"metadata-notifications-{os.getenv('HOSTNAME', 'local')}",
         auto_offset_reset="latest",
+        enable_auto_commit=False,
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     )
+    dlq = AIOKafkaProducer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        client_id=f"metadata-notifications-dlq-{os.getenv('HOSTNAME', 'local')}",
+        acks="all",
+        enable_idempotence=True,
+        key_serializer=lambda value: value.encode("utf-8"),
+        value_serializer=lambda value: json.dumps(value, default=str).encode("utf-8"),
+    )
     await consumer.start()
+    await dlq.start()
     try:
         async for msg in consumer:
             data = msg.value
-            event = data.get("event")
-            user_id = data.get("user_id") or data.get("shared_by")
-            if not event or not user_id:
-                continue
-
-            if redis_client:
-                msg_payload = {
-                    "type": "activity",
-                    "action": event,
-                    "resource_name": data.get("filename") or data.get("folder_name") or "",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                recipients = {user_id}
-                if data.get("shared_with"):
-                    recipients.add(data["shared_with"])
-                for recipient in recipients:
-                    await redis_client.publish(
-                        f"notifications:{recipient}", json.dumps(msg_payload)
+            event_id = str(
+                data.get("event_id")
+                or uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"kafka:{msg.topic}:{msg.partition}:{msg.offset}",
+                )
+            )
+            data.setdefault("event_id", event_id)
+            last_error = None
+            max_retries = max(1, int(os.getenv("KAFKA_CONSUMER_MAX_RETRIES", "3")))
+            backoff = max(
+                0.0, float(os.getenv("KAFKA_CONSUMER_RETRY_BACKOFF_SECONDS", "2"))
+            )
+            for attempt in range(1, max_retries + 1):
+                try:
+                    event = data.get("event")
+                    user_id = data.get("user_id") or data.get("shared_by")
+                    if event and user_id and redis_client:
+                        msg_payload = {
+                            "type": "activity",
+                            "action": event,
+                            "resource_name": data.get("filename") or data.get("folder_name") or "",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        recipients = {user_id}
+                        if data.get("shared_with"):
+                            recipients.add(data["shared_with"])
+                        for recipient in recipients:
+                            await redis_client.publish(
+                                f"notifications:{recipient}", json.dumps(msg_payload)
+                            )
+                    last_error = None
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - consumer boundary
+                    last_error = error
+                    logger.exception(
+                        "Notification event %s failed on attempt %s/%s",
+                        event_id,
+                        attempt,
+                        max_retries,
                     )
+                    if attempt < max_retries and backoff:
+                        await asyncio.sleep(backoff * attempt)
+
+            if last_error is not None:
+                await dlq.send_and_wait(
+                    settings.KAFKA_TOPIC_DEAD_LETTER,
+                    {
+                        "event_id": event_id,
+                        "event": "DEAD_LETTERED",
+                        "failed_consumer_group": "metadata-notifications",
+                        "source_topic": msg.topic,
+                        "source_partition": msg.partition,
+                        "source_offset": msg.offset,
+                        "error_type": type(last_error).__name__,
+                        "error": str(last_error)[:2000],
+                        "original_event": data,
+                    },
+                    key=event_id,
+                )
+            await consumer.commit(
+                {TopicPartition(msg.topic, msg.partition): msg.offset + 1}
+            )
     finally:
         await consumer.stop()
+        await dlq.stop()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -158,6 +222,7 @@ async def lifespan(app: FastAPI):
                             },
                             "mime_type": {"type": "keyword"},
                             "user_id": {"type": "keyword"},
+                            "project_id": {"type": "keyword"},
                             "folder_id": {"type": "keyword"},
                             "size": {"type": "long"},
                             "is_deleted": {"type": "boolean"},
@@ -166,6 +231,11 @@ async def lifespan(app: FastAPI):
                         }
                     },
                 },
+            )
+        else:
+            await es_client.indices.put_mapping(
+                index="cloudvault-files",
+                properties={"project_id": {"type": "keyword"}},
             )
     except Exception:
         pass  # ES may not be ready yet; search-indexer will handle it
@@ -180,6 +250,8 @@ async def lifespan(app: FastAPI):
     await close_auth_dependencies()
     if notification_consumer_task:
         notification_consumer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await notification_consumer_task
 
 
 # ── FastAPI App ──
@@ -192,7 +264,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -215,6 +287,7 @@ def _file_to_dict(f: File) -> dict:
         "size": f.size,
         "folder_id": f.folder_id,
         "user_id": f.user_id,
+        "project_id": f.project_id,
         "minio_bucket": f.minio_bucket,
         "minio_key": f.minio_key,
         "checksum_sha256": f.checksum_sha256,
@@ -234,18 +307,22 @@ import json
 # ── WebSocket Notifications ──
 
 @app.websocket("/api/v1/metadata/ws/notifications")
-async def websocket_notifications(websocket: WebSocket, token: str = Query(None)):
-    if not token:
-        await websocket.close(code=1008)
-        return
+async def websocket_notifications(websocket: WebSocket):
+    # Browser WebSocket APIs cannot attach an Authorization header. Authenticate
+    # with the first frame instead of a query parameter so access tokens never
+    # appear in gateway/Uvicorn request logs, browser history, or copied URLs.
+    await websocket.accept()
     try:
+        auth_message = await asyncio.wait_for(websocket.receive_text(), timeout=5)
+        auth_payload = json.loads(auth_message)
+        token = auth_payload.get("token") if auth_payload.get("type") == "authenticate" else None
+        if not isinstance(token, str) or not token:
+            raise ValueError("missing websocket authentication token")
         async with async_session() as session:
             user = await authenticate_token(token, session)
-    except Exception:
+    except (asyncio.TimeoutError, json.JSONDecodeError, ValueError, HTTPException):
         await websocket.close(code=1008)
         return
-        
-    await websocket.accept()
     
     pubsub = redis_client.pubsub()
     channel = f"notifications:{user.id}"
@@ -449,6 +526,102 @@ async def get_storage(
 
 
 # ══════════════════════════════════════════════
+# USER-SCOPED ANALYTICS
+# ══════════════════════════════════════════════
+
+@app.get("/api/v1/analytics/stats")
+async def get_analytics_stats(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if user.role == "admin":
+        project_ids = select(Project.id)
+    else:
+        project_ids = select(ProjectMembership.project_id).where(
+            ProjectMembership.user_id == user.id
+        )
+    access_filter = or_(
+        and_(File.user_id == user.id, File.project_id.is_(None)),
+        File.project_id.in_(project_ids),
+    )
+    active_filter = and_(access_filter, File.is_deleted.is_(False))
+
+    project_count = await db.scalar(select(func.count()).select_from(project_ids.subquery())) or 0
+    total_storage = await db.scalar(
+        select(func.coalesce(func.sum(File.size), 0)).where(access_filter)
+    ) or 0
+    trash_bytes = await db.scalar(
+        select(func.coalesce(func.sum(File.size), 0)).where(
+            access_filter, File.is_deleted.is_(True)
+        )
+    ) or 0
+    active_files = await db.scalar(
+        select(func.count(File.id)).where(active_filter)
+    ) or 0
+
+    project_starred_ids = select(ProjectFileStar.file_id).where(
+        ProjectFileStar.user_id == user.id
+    )
+    starred_files = await db.scalar(
+        select(func.count(File.id)).where(
+            active_filter,
+            or_(
+                and_(File.project_id.is_(None), File.is_starred.is_(True)),
+                File.id.in_(project_starred_ids),
+            ),
+        )
+    ) or 0
+    active_shares = await db.scalar(
+        select(func.count(func.distinct(SharedLink.id)))
+        .select_from(SharedLink)
+        .join(File, File.id == SharedLink.file_id)
+        .where(
+            active_filter,
+            SharedLink.is_active.is_(True),
+            or_(SharedLink.expires_at.is_(None), SharedLink.expires_at > now),
+        )
+    ) or 0
+
+    file_type_result = await db.execute(
+        select(File.mime_type, func.count(File.id))
+        .where(active_filter)
+        .group_by(File.mime_type)
+    )
+    hour_expression = func.date_format(File.created_at, "%Y-%m-%d %H:00:00")
+    hourly_result = await db.execute(
+        select(hour_expression, func.count(File.id))
+        .where(active_filter, File.created_at >= now - timedelta(hours=24))
+        .group_by(hour_expression)
+        .order_by(hour_expression)
+    )
+    day_expression = func.date(File.created_at)
+    daily_result = await db.execute(
+        select(day_expression, func.coalesce(func.sum(File.size), 0))
+        .where(access_filter, File.created_at >= now - timedelta(days=6))
+        .group_by(day_expression)
+        .order_by(day_expression)
+    )
+
+    return {
+        "generated_at": now.replace(tzinfo=timezone.utc).isoformat(),
+        "scope": {"personal": True, "project_count": int(project_count)},
+        "cards": {
+            "total_storage_bytes": int(total_storage),
+            "active_files": int(active_files),
+            "starred_files": int(starred_files),
+            "active_shares": int(active_shares),
+            "trash_bytes": int(trash_bytes),
+        },
+        "file_types": summarize_file_types(file_type_result.all()),
+        "upload_activity": build_upload_activity(hourly_result.all(), now),
+        "storage_growth": build_storage_growth(
+            int(total_storage), daily_result.all(), now.date()
+        ),
+    }
+
+
+# ══════════════════════════════════════════════
 # SEARCH ROUTES
 # ══════════════════════════════════════════════
 
@@ -464,16 +637,36 @@ async def search_files(
     date_to: Optional[datetime] = Query(None),
     sort_by: str = Query("relevance", pattern="^(relevance|created_at|updated_at|size)$"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    project_id: Optional[str] = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    project = None
+    if project_id:
+        project_result = await db.execute(
+            select(Project).where((Project.id == project_id) | (Project.slug == project_id))
+        )
+        project = project_result.scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if user.role != "admin":
+            membership = await db.scalar(select(ProjectMembership).where(
+                ProjectMembership.project_id == project.id,
+                ProjectMembership.user_id == user.id,
+            ))
+            if not membership:
+                raise HTTPException(status_code=403, detail="Project access denied")
+
     # Try Elasticsearch first
     if es_client:
         try:
-            filters = [
-                {"term": {"user_id": user.id}},
-                {"term": {"is_deleted": False}},
-            ]
+            filters = [{"term": {"is_deleted": False}}]
+            must_not = []
+            if project:
+                filters.append({"term": {"project_id": project.id}})
+            else:
+                filters.append({"term": {"user_id": user.id}})
+                must_not.append({"exists": {"field": "project_id"}})
             if mime_type:
                 filters.append({"prefix": {"mime_type": mime_type}})
             if min_size is not None or max_size is not None:
@@ -505,6 +698,7 @@ async def search_files(
                             }
                         ],
                         "filter": filters,
+                        "must_not": must_not,
                     }
                 },
                 "from": (page - 1) * page_size,
@@ -525,7 +719,19 @@ async def search_files(
                 src["id"] = hit["_id"]
                 if "highlight" in hit:
                     src["highlight"] = hit["highlight"]
+                if project:
+                    src["project_name"] = project.name
+                    src["project_slug"] = project.slug
                 files.append(src)
+
+            if project and files:
+                starred_result = await db.execute(select(ProjectFileStar.file_id).where(
+                    ProjectFileStar.user_id == user.id,
+                    ProjectFileStar.file_id.in_([item["id"] for item in files]),
+                ))
+                starred_ids = set(starred_result.scalars().all())
+                for item in files:
+                    item["is_starred"] = item["id"] in starred_ids
 
             return {"files": files, "total": total, "page": page, "page_size": page_size}
         except Exception:
@@ -533,10 +739,13 @@ async def search_files(
 
     # Fallback: MySQL search
     conditions = [
-        File.user_id == user.id,
         File.is_deleted == False,
         File.original_name.like(f"%{q}%"),
     ]
+    if project:
+        conditions.append(File.project_id == project.id)
+    else:
+        conditions.extend([File.user_id == user.id, File.project_id.is_(None)])
     if mime_type:
         conditions.append(File.mime_type.like(f"{mime_type}%"))
     if min_size is not None:
@@ -553,6 +762,13 @@ async def search_files(
     query = select(File).where(*conditions).order_by(order_clause).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     files = result.scalars().all()
+    starred_ids = set()
+    if project and files:
+        starred_result = await db.execute(select(ProjectFileStar.file_id).where(
+            ProjectFileStar.user_id == user.id,
+            ProjectFileStar.file_id.in_([item.id for item in files]),
+        ))
+        starred_ids = set(starred_result.scalars().all())
 
     count_q = select(func.count()).select_from(
         select(File).where(*conditions).subquery()
@@ -560,7 +776,14 @@ async def search_files(
     total = (await db.execute(count_q)).scalar() or 0
 
     return {
-        "files": [_file_to_dict(f) for f in files],
+        "files": [
+            {
+                **_file_to_dict(f),
+                **({"is_starred": f.id in starred_ids} if project else {}),
+                **({"project_name": project.name, "project_slug": project.slug} if project else {}),
+            }
+            for f in files
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,

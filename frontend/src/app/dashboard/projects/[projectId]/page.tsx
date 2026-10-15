@@ -6,16 +6,19 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   Activity, AlertCircle, Archive, ArchiveRestore, ArrowLeft, Check, Copy, Download, Eye, File,
   Folder, FolderPlus, HardDrive, Home, KeyRound, Loader2, RefreshCw, RotateCcw,
-  Save, Search, Shield, Star, Trash2, Upload, UserPlus, X,
+  Save, Search, Shield, Star, Trash2, UserPlus, X,
 } from 'lucide-react';
 import {
   ApiError, AuditActivity, Project, ProjectFile, ProjectFileFilters, ProjectFolder,
-  ProjectMember, ProjectOperationStatus, ProjectUsage, ServiceAccount, metaApi, projectApi,
+  ProjectMember, ProjectMemberCandidate, ProjectOperationStatus, ProjectUsage, ServiceAccount,
+  metaApi, projectApi,
 } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
+import { ProjectUploadQueue } from '@/components/ProjectUploadQueue';
+import { useAuth } from '@/lib/auth-context';
 
-type Tab = 'files' | 'trash' | 'members' | 'access' | 'policy' | 'activity';
+type Tab = 'files' | 'trash' | 'members' | 'integrations' | 'operations' | 'policy' | 'activity';
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -42,6 +45,7 @@ function activityResourceName(activity: AuditActivity): string {
 }
 
 export default function ProjectDetailPage() {
+  const { user } = useAuth();
   const params = useParams<{ projectId: string }>();
   const router = useRouter();
   const projectId = params.projectId;
@@ -55,13 +59,15 @@ export default function ProjectDetailPage() {
   const [folderPath, setFolderPath] = useState<ProjectFolder[]>([]);
   const [previewFile, setPreviewFile] = useState<ProjectFile | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
+  const [memberCandidates, setMemberCandidates] = useState<ProjectMemberCandidate[]>([]);
+  const [memberQuery, setMemberQuery] = useState('');
+  const [selectedCandidateId, setSelectedCandidateId] = useState('');
+  const [memberSearchLoading, setMemberSearchLoading] = useState(false);
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
   const [activities, setActivities] = useState<AuditActivity[]>([]);
   const [tab, setTab] = useState<Tab>('files');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
   const [secret, setSecret] = useState<{ name: string; token: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
@@ -157,31 +163,6 @@ export default function ProjectDetailPage() {
       setDeleteConfirmation('');
     } finally {
       setLifecycleBusy(false);
-    }
-  };
-
-  const uploadFile = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const selected = form.get('file');
-    if (!(selected instanceof window.File) || !selected.name) return;
-    setUploading(true);
-    setUploadProgress(0);
-    setError('');
-    try {
-      await projectApi.uploadWithProgress(projectId, selected, {
-        artifact_type: String(form.get('artifact_type')),
-        retention_class: String(form.get('retention_class')),
-        logical_date: new Date().toISOString(),
-        source_run_id: crypto.randomUUID(),
-      }, setUploadProgress, undefined, currentFolderId);
-      formElement.reset();
-      await loadData();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -343,6 +324,13 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const refreshOperations = async () => {
+    try {
+      setOperations(await projectApi.getOperations(projectId));
+      setUsage(await projectApi.getUsage(projectId));
+    } catch (err) { setError(errorMessage(err)); }
+  };
+
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -350,10 +338,20 @@ export default function ProjectDetailPage() {
     setSettingsSaved(false);
     setError('');
     try {
-      const parsedRetention = JSON.parse(String(form.get('retention_policy') || '{}')) as unknown;
-      if (!parsedRetention || typeof parsedRetention !== 'object' || Array.isArray(parsedRetention)) {
-        throw new Error('Retention policy must be a JSON object.');
+      const retentionPolicy = { ...(project?.retention_policy || {}) };
+      for (const key of ['default_days', 'temporary_days', 'archive_days'] as const) {
+        const raw = String(form.get(key) || '').trim();
+        if (!raw) delete retentionPolicy[key];
+        else {
+          const days = Number(raw);
+          if (!Number.isInteger(days) || days < 1) throw new Error('Retention days must be positive whole numbers.');
+          retentionPolicy[key] = days;
+        }
       }
+      const mimeTypes = String(form.get('allowed_mime_types') || '')
+        .split(',').map((value) => value.trim()).filter(Boolean);
+      if (mimeTypes.length) retentionPolicy.allowed_mime_types = [...new Set(mimeTypes)];
+      else delete retentionPolicy.allowed_mime_types;
       const updated = await projectApi.update(projectId, {
         name: String(form.get('name')),
         description: String(form.get('description') || ''),
@@ -361,7 +359,7 @@ export default function ProjectDetailPage() {
         storage_quota: Math.round(Number(form.get('quota_gb')) * 1024 ** 3),
         max_file_size: Math.round(Number(form.get('max_file_mb')) * 1024 ** 2),
         warning_percent: Number(form.get('warning_percent')),
-        retention_policy: parsedRetention as Record<string, unknown>,
+        retention_policy: retentionPolicy,
       });
       setProject(updated);
       setUsage(await projectApi.getUsage(projectId));
@@ -379,11 +377,29 @@ export default function ProjectDetailPage() {
     const form = new FormData(formElement);
     try {
       const member = await projectApi.addMember(
-        projectId, String(form.get('user_id')), String(form.get('role')) as ProjectMember['role'],
+        projectId, selectedCandidateId, String(form.get('role')) as ProjectMember['role'],
       );
       setMembers((current) => [...current, member].sort((a, b) => a.username.localeCompare(b.username)));
       formElement.reset();
+      setMemberQuery('');
+      setSelectedCandidateId('');
+      setMemberCandidates([]);
     } catch (err) { setError(errorMessage(err)); }
+  };
+
+  const searchMemberCandidates = async () => {
+    if (memberQuery.trim().length < 2) return;
+    setMemberSearchLoading(true);
+    setError('');
+    try {
+      const candidates = await projectApi.searchMemberCandidates(projectId, memberQuery.trim());
+      setMemberCandidates(candidates);
+      setSelectedCandidateId(candidates.length === 1 ? candidates[0].id : '');
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setMemberSearchLoading(false);
+    }
   };
 
   const changeMemberRole = async (member: ProjectMember, role: ProjectMember['role']) => {
@@ -401,13 +417,34 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const transferOwnership = async (member: ProjectMember) => {
+    if (!project || !window.confirm(
+      `Transfer ownership of ${project.name} to ${member.username}? Project data and service accounts will remain unchanged.`,
+    )) return;
+    setLifecycleBusy(true);
+    setError('');
+    try {
+      setProject(await projectApi.transferOwnership(projectId, member.user_id));
+      await refreshActivity();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
   const createAccount = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const scopes = form.getAll('scopes').map(String);
     try {
-      const account = await projectApi.createServiceAccount(projectId, { name: String(form.get('name')), scopes });
+      const expiresAt = String(form.get('expires_at') || '');
+      const account = await projectApi.createServiceAccount(projectId, {
+        name: String(form.get('name')),
+        scopes,
+        ...(expiresAt ? { expires_at: new Date(`${expiresAt}T23:59:59`).toISOString() } : {}),
+      });
       setAccounts((current) => [account, ...current]);
       setSecret({ name: account.name, token: account.token || '' });
       formElement.reset();
@@ -440,11 +477,16 @@ export default function ProjectDetailPage() {
   );
 
   const usagePercent = Math.min(100, usage?.percentage || 0);
+  const retentionPolicy = project.retention_policy || {};
+  const allowedMimeTypes = Array.isArray(retentionPolicy.allowed_mime_types)
+    ? retentionPolicy.allowed_mime_types.map(String)
+    : [];
+  const publicApiBase = typeof window === 'undefined' ? '' : window.location.origin;
   const tabs: { id: Tab; label: string }[] = [
     { id: 'files', label: 'Files' }, { id: 'trash', label: `Trash${trash.length ? ` (${trash.length})` : ''}` },
     { id: 'members', label: 'Members' }, { id: 'activity', label: 'Activity' },
-    { id: 'policy', label: 'Settings' },
-    ...(isAdmin ? [{ id: 'access' as Tab, label: 'Service accounts' }] : []),
+    { id: 'operations', label: 'Health / Operations' }, { id: 'policy', label: 'Settings' },
+    ...(isAdmin ? [{ id: 'integrations' as Tab, label: 'Integrations' }] : []),
   ];
 
   return (
@@ -491,7 +533,7 @@ export default function ProjectDetailPage() {
 
       {error && <div className="flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-red-300"><span className="flex items-center gap-3"><AlertCircle size={18} />{error}</span><button onClick={() => setError('')}><X size={17} /></button></div>}
 
-      {operations && operations.health_status !== 'unknown' && (
+      {operations && operations.health_status !== 'unknown' && operations.health_status !== 'healthy' && (
         <div className={`rounded-xl border p-4 ${
           operations.health_status === 'critical'
             ? 'border-red-500/30 bg-red-500/10 text-red-200'
@@ -505,20 +547,20 @@ export default function ProjectDetailPage() {
             </span>
             <span className="text-xs opacity-70">Checked {formatDate(operations.checked_at)}</span>
           </div>
-          {operations.health_status !== 'healthy' && (
-            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs opacity-90">
-              <span>Missing objects: {operations.missing_objects || 0}</span>
-              <span>Orphan objects: {operations.orphan_objects || 0}</span>
-              <span>Stale uploads: {operations.stale_uploads || 0}</span>
-              <span>Expired files: {operations.expired_files || 0}</span>
-              <span>Usage drift: {formatBytes(Math.abs(operations.usage_drift_bytes || 0))}</span>
-            </div>
-          )}
+          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs opacity-90">
+            <span>Missing objects: {operations.missing_objects || 0}</span>
+            <span>Orphan objects: {operations.orphan_objects || 0}</span>
+            <span>Stale uploads: {operations.stale_uploads || 0}</span>
+            <span>Expired files: {operations.expired_files || 0}</span>
+            <span>Usage drift: {formatBytes(Math.abs(operations.usage_drift_bytes || 0))}</span>
+          </div>
         </div>
       )}
 
-      <div className="flex gap-2 overflow-x-auto border-b border-gray-800">
-        {tabs.map((item) => <button key={item.id} onClick={() => setTab(item.id)} className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm ${tab === item.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-gray-400 hover:text-white'}`}>{item.label}</button>)}
+      <div className="overflow-x-auto border-b border-gray-800" role="tablist" aria-label="Project sections">
+        <div className="flex min-w-max gap-1">
+          {tabs.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)} className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-3 text-sm ${tab === item.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-gray-400 hover:text-white'}`}>{item.label}</button>)}
+        </div>
       </div>
 
       {tab === 'files' && (
@@ -558,12 +600,11 @@ export default function ProjectDetailPage() {
           )}
 
           {canWrite && (
-            <form onSubmit={uploadFile} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-5 md:grid-cols-[1fr_180px_180px_auto] md:items-end">
-              <label className="text-sm text-gray-300">File<input required name="file" type="file" className="mt-1.5 block w-full rounded-lg border border-gray-700 bg-gray-950 p-2 text-sm text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-500/10 file:px-3 file:py-1 file:text-cyan-300" /></label>
-              <label className="text-sm text-gray-300">Artifact type<input required name="artifact_type" defaultValue="document" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-              <label className="text-sm text-gray-300">Retention class<select name="retention_class" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="default">default</option><option value="temporary">temporary</option><option value="archive">archive</option></select></label>
-              <button disabled={uploading} className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950 disabled:opacity-50">{uploading ? <Loader2 className="animate-spin" size={17} /> : <Upload size={17} />}{uploading ? `${uploadProgress}%` : 'Upload'}</button>
-            </form>
+            <ProjectUploadQueue
+              projectId={projectId}
+              currentFolderId={currentFolderId}
+              onComplete={loadData}
+            />
           )}
           {files.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-gray-700 p-14 text-center text-gray-400"><File className="mx-auto mb-3 text-gray-600" size={42} /><p>No files in this project.</p>{!canWrite && <p className="mt-1 text-xs">Your viewer role is read-only.</p>}</div>
@@ -634,8 +675,16 @@ export default function ProjectDetailPage() {
 
       {tab === 'members' && (
         <section className="space-y-5">
-          {isAdmin && <form onSubmit={addMember} className="grid gap-3 rounded-2xl border border-gray-800 bg-gray-900 p-5 md:grid-cols-[1fr_180px_auto] md:items-end"><label className="text-sm text-gray-300">User ID<input required name="user_id" placeholder="UUID of an active user" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><label className="text-sm text-gray-300">Role<select name="role" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><UserPlus size={17} /> Add member</button></form>}
-          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{members.map((member) => <div key={member.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-800 font-semibold text-gray-300">{member.username.charAt(0).toUpperCase()}</div><div><div className="font-medium text-white">{member.username}</div><div className="text-sm text-gray-500">{member.email}</div></div></div><div className="flex items-center gap-2">{isAdmin ? <select value={member.role} onChange={(event) => void changeMemberRole(member, event.target.value as ProjectMember['role'])} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm capitalize text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select> : <span className="rounded-full border border-gray-700 px-3 py-1 text-xs capitalize text-gray-300">{member.role}</span>}{isAdmin && <button onClick={() => void removeMember(member)} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></div>)}</div></div>
+          {isAdmin && <form onSubmit={addMember} className="space-y-4 rounded-2xl border border-gray-800 bg-gray-900 p-5">
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <label className="text-sm text-gray-300">Find user by email or username<input value={memberQuery} onChange={(event) => { setMemberQuery(event.target.value); setSelectedCandidateId(''); }} minLength={2} placeholder="name@example.com or username" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
+              <button type="button" disabled={memberSearchLoading || memberQuery.trim().length < 2} onClick={() => void searchMemberCandidates()} className="inline-flex items-center justify-center gap-2 rounded-lg border border-cyan-500/30 px-4 py-2 text-cyan-300 disabled:opacity-40">{memberSearchLoading ? <Loader2 className="animate-spin" size={17} /> : <Search size={17} />} Search</button>
+            </div>
+            {memberCandidates.length > 0 && <div className="grid gap-2 sm:grid-cols-2">{memberCandidates.map((candidate) => <label key={candidate.id} className={`cursor-pointer rounded-xl border p-3 ${selectedCandidateId === candidate.id ? 'border-cyan-500/60 bg-cyan-500/10' : 'border-gray-800 bg-gray-950/60'}`}><input type="radio" name="candidate" value={candidate.id} checked={selectedCandidateId === candidate.id} onChange={() => setSelectedCandidateId(candidate.id)} className="mr-3 accent-cyan-500" /><span className="font-medium text-gray-200">{candidate.username}</span><span className="ml-2 text-sm text-gray-500">{candidate.email}</span></label>)}</div>}
+            {memberCandidates.length === 0 && memberQuery.trim().length >= 2 && !memberSearchLoading && <p className="text-sm text-gray-500">Search to find active users who are not already members.</p>}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-end"><label className="text-sm text-gray-300">Role<select name="role" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label><button disabled={!selectedCandidateId} className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950 disabled:opacity-40"><UserPlus size={17} /> Add member</button></div>
+          </form>}
+          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{members.map((member) => <div key={member.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-800 font-semibold text-gray-300">{member.username.charAt(0).toUpperCase()}</div><div><div className="flex items-center gap-2 font-medium text-white">{member.username}{project?.created_by === member.user_id && <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">Owner</span>}</div><div className="text-sm text-gray-500">{member.email}</div></div></div><div className="flex flex-wrap items-center gap-2">{isAdmin ? <select value={member.role} onChange={(event) => void changeMemberRole(member, event.target.value as ProjectMember['role'])} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm capitalize text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select> : <span className="rounded-full border border-gray-700 px-3 py-1 text-xs capitalize text-gray-300">{member.role}</span>}{isAdmin && member.role === 'admin' && project?.created_by !== member.user_id && (project?.created_by === user?.id || user?.role === 'admin') && <button disabled={lifecycleBusy} onClick={() => void transferOwnership(member)} className="inline-flex items-center gap-2 rounded-lg border border-amber-500/25 px-3 py-2 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"><Shield size={15} /> Transfer ownership</button>}{isAdmin && <button onClick={() => void removeMember(member)} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></div>)}</div></div>
         </section>
       )}
 
@@ -651,6 +700,23 @@ export default function ProjectDetailPage() {
               </div>
             </div>
           )}
+        </section>
+      )}
+
+      {tab === 'operations' && (
+        <section className="space-y-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="font-semibold text-white">Storage operations</h2><p className="mt-1 text-sm text-gray-500">Latest reconciliation between metadata, quota accounting and object storage.</p></div><button onClick={() => void refreshOperations()} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Refresh</button></div>
+          <div className={`rounded-2xl border p-5 ${operations?.health_status === 'critical' ? 'border-red-500/30 bg-red-500/10' : operations?.health_status === 'warning' ? 'border-amber-500/30 bg-amber-500/10' : 'border-emerald-500/20 bg-emerald-500/10'}`}><div className="flex items-center justify-between gap-3"><span className="inline-flex items-center gap-2 font-medium capitalize text-white"><Shield size={18} /> {operations?.health_status || 'unknown'}</span><span className="text-xs text-gray-400">Checked {formatDate(operations?.checked_at || null)}</span></div></div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Metadata bytes</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(operations?.metadata_bytes || 0)}</div></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Object bytes</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(operations?.object_bytes || 0)}</div></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Usage drift</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(Math.abs(operations?.usage_drift_bytes || 0))}</div></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="text-sm text-gray-500">Available</div><div className="mt-2 text-xl font-semibold text-white">{formatBytes(usage?.available_bytes || 0)}</div></div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[['Missing objects', operations?.missing_objects || 0], ['Orphan objects', operations?.orphan_objects || 0], ['Stale uploads', operations?.stale_uploads || 0], ['Expired files', operations?.expired_files || 0]].map(([label, value]) => <div key={String(label)} className="rounded-xl border border-gray-800 bg-gray-900 p-4"><div className="text-sm text-gray-500">{label}</div><div className={`mt-2 text-2xl font-semibold ${Number(value) ? 'text-amber-300' : 'text-emerald-300'}`}>{value}</div></div>)}
+          </div>
+          {!operations && <div className="rounded-xl border border-dashed border-gray-700 p-10 text-center text-gray-500">No reconciliation result is available yet.</div>}
         </section>
       )}
 
@@ -671,7 +737,15 @@ export default function ProjectDetailPage() {
                 <label className="text-sm text-gray-300">Quota (GB)<input required name="quota_gb" type="number" min="0" step="0.01" defaultValue={Number((project.storage_quota / 1024 ** 3).toFixed(4))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
                 <label className="text-sm text-gray-300">Maximum file size (MB)<input required name="max_file_mb" type="number" min="1" step="1" defaultValue={Number((project.max_file_size / 1024 ** 2).toFixed(2))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
                 <label className="text-sm text-gray-300">Warning threshold (%)<input required name="warning_percent" type="number" min="1" max="100" defaultValue={project.warning_percent} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
-                <label className="text-sm text-gray-300 md:col-span-2">Retention policy (JSON)<textarea required name="retention_policy" rows={8} defaultValue={JSON.stringify(project.retention_policy || {}, null, 2)} spellCheck={false} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 font-mono text-sm text-gray-200" /></label>
+                <fieldset className="space-y-4 rounded-xl border border-gray-800 p-4 md:col-span-2">
+                  <legend className="px-2 text-sm font-medium text-gray-200">Retention policy</legend>
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <label className="text-sm text-gray-300">Default (days)<input name="default_days" type="number" min="1" step="1" defaultValue={typeof retentionPolicy.default_days === 'number' ? retentionPolicy.default_days : ''} placeholder="No expiry" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                    <label className="text-sm text-gray-300">Temporary (days)<input name="temporary_days" type="number" min="1" step="1" defaultValue={typeof retentionPolicy.temporary_days === 'number' ? retentionPolicy.temporary_days : ''} placeholder="No expiry" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                    <label className="text-sm text-gray-300">Archive (days)<input name="archive_days" type="number" min="1" step="1" defaultValue={typeof retentionPolicy.archive_days === 'number' ? retentionPolicy.archive_days : ''} placeholder="No expiry" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /></label>
+                  </div>
+                  <label className="text-sm text-gray-300">Allowed MIME types<input name="allowed_mime_types" defaultValue={allowedMimeTypes.join(', ')} placeholder="application/pdf, text/csv (empty allows all)" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-white" /><span className="mt-1 block text-xs text-gray-500">Comma-separated. Leave empty to accept every MIME type.</span></label>
+                </fieldset>
               </div>
               {project.status === 'archived' && <p className="text-sm text-amber-300">Use Restore project before changing its lifecycle status. Other policy fields can still be updated.</p>}
               <div className="flex items-center justify-end gap-3">
@@ -680,16 +754,20 @@ export default function ProjectDetailPage() {
               </div>
             </form>
           ) : (
-            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><h2 className="font-medium text-white">Retention policy</h2><pre className="mt-3 overflow-x-auto rounded-xl bg-gray-950 p-4 text-sm text-gray-300">{JSON.stringify(project.retention_policy || {}, null, 2)}</pre></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><h2 className="font-medium text-white">Retention policy</h2><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-xl bg-gray-950 p-3"><div className="text-xs text-gray-500">Default</div><div className="mt-1 text-gray-200">{typeof retentionPolicy.default_days === 'number' ? `${retentionPolicy.default_days} days` : 'No expiry'}</div></div><div className="rounded-xl bg-gray-950 p-3"><div className="text-xs text-gray-500">Temporary</div><div className="mt-1 text-gray-200">{typeof retentionPolicy.temporary_days === 'number' ? `${retentionPolicy.temporary_days} days` : 'Uses default'}</div></div><div className="rounded-xl bg-gray-950 p-3"><div className="text-xs text-gray-500">Archive</div><div className="mt-1 text-gray-200">{typeof retentionPolicy.archive_days === 'number' ? `${retentionPolicy.archive_days} days` : 'Uses default'}</div></div></div><div className="mt-3 text-sm text-gray-400">Allowed MIME types: {allowedMimeTypes.length ? allowedMimeTypes.join(', ') : 'All'}</div></div>
           )}
         </section>
       )}
 
-      {tab === 'access' && isAdmin && (
+      {tab === 'integrations' && isAdmin && (
         <section className="space-y-5">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><h2 className="font-semibold text-white">Connection details</h2><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-gray-500">Project ID / slug</dt><dd className="mt-1 font-mono text-cyan-200">{project.slug}</dd></div><div><dt className="text-gray-500">Upload endpoint</dt><dd className="mt-1 break-all font-mono text-gray-300">{publicApiBase}/api/v1/projects/{project.slug}/files/upload</dd></div><div><dt className="text-gray-500">Authentication</dt><dd className="mt-1 text-gray-300">Bearer service-account token</dd></div></dl></div>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><h2 className="font-semibold text-white">Application environment</h2><pre className="mt-4 overflow-x-auto rounded-xl bg-gray-950 p-4 text-xs text-gray-300">{`CLOUDVAULT_URL=${publicApiBase || 'http://localhost'}\nCLOUDVAULT_PROJECT_ID=${project.slug}\nCLOUDVAULT_TOKEN=<service-account-token>`}</pre><p className="mt-3 text-xs text-gray-500">Keep the token in a secret store. Never commit it to the connected project.</p></div>
+          </div>
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200"><Shield className="mr-2 inline" size={17} />Tokens grant machine access only to this project. A raw token is shown once after creation or rotation.</div>
-          {project.status === 'active' && <form onSubmit={createAccount} className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="grid gap-4 lg:grid-cols-[1fr_2fr_auto] lg:items-end"><label className="text-sm text-gray-300">Account name<input required name="name" minLength={2} placeholder="news-flow-worker" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><fieldset><legend className="mb-2 text-sm text-gray-300">Scopes</legend><div className="flex flex-wrap gap-3">{['files:create', 'files:read', 'files:delete', 'project:usage:read'].map((scope) => <label key={scope} className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" name="scopes" value={scope} defaultChecked={scope !== 'files:delete'} className="accent-cyan-500" />{scope}</label>)}</div></fieldset><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><KeyRound size={17} /> Create token</button></div></form>}
-          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{accounts.length === 0 ? <div className="p-10 text-center text-gray-500">No service accounts.</div> : accounts.map((account) => <div key={account.id} className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex items-center gap-2"><span className="font-medium text-white">{account.name}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${account.is_active ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>{account.is_active ? 'active' : 'revoked'}</span></div><div className="mt-1 font-mono text-xs text-gray-500">{account.token_prefix ? `${account.token_prefix}…` : 'No active credential'} · last used {formatDate(account.last_used_at)}</div><div className="mt-2 flex flex-wrap gap-1">{account.scopes.map((scope) => <span key={scope} className="rounded bg-gray-800 px-2 py-1 text-[10px] text-gray-400">{scope}</span>)}</div></div><div className="flex gap-2">{project.status === 'active' && <button onClick={() => void rotateAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Rotate</button>}{account.is_active && <button onClick={() => void revokeAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/20 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Revoke</button>}</div></div>)}</div></div>
+          {project.status === 'active' && <form onSubmit={createAccount} className="rounded-2xl border border-gray-800 bg-gray-900 p-5"><div className="grid gap-4 lg:grid-cols-[1fr_180px_2fr_auto] lg:items-end"><label className="text-sm text-gray-300">Account name<input required name="name" minLength={2} placeholder="news-flow-worker" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><label className="text-sm text-gray-300">Expires (optional)<input name="expires_at" type="date" min={new Date().toISOString().slice(0, 10)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label><fieldset><legend className="mb-2 text-sm text-gray-300">Scopes</legend><div className="flex flex-wrap gap-3">{['files:create', 'files:read', 'files:delete', 'project:usage:read'].map((scope) => <label key={scope} className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" name="scopes" value={scope} defaultChecked={scope !== 'files:delete'} className="accent-cyan-500" />{scope}</label>)}</div></fieldset><button className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950"><KeyRound size={17} /> Create token</button></div></form>}
+          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{accounts.length === 0 ? <div className="p-10 text-center text-gray-500">No service accounts.</div> : accounts.map((account) => <div key={account.id} className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex items-center gap-2"><span className="font-medium text-white">{account.name}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${account.is_active ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>{account.is_active ? 'active' : 'revoked'}</span></div><div className="mt-1 font-mono text-xs text-gray-500">{account.token_prefix ? `${account.token_prefix}…` : 'No active credential'} · last used {formatDate(account.last_used_at)} · expires {formatDate(account.expires_at)}</div><div className="mt-2 flex flex-wrap gap-1">{account.scopes.map((scope) => <span key={scope} className="rounded bg-gray-800 px-2 py-1 text-[10px] text-gray-400">{scope}</span>)}</div></div><div className="flex gap-2">{project.status === 'active' && <button onClick={() => void rotateAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-cyan-500/40 hover:text-cyan-300"><RefreshCw size={15} /> Rotate</button>}{account.is_active && <button onClick={() => void revokeAccount(account)} className="inline-flex items-center gap-2 rounded-lg border border-red-500/20 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Revoke</button>}</div></div>)}</div></div>
         </section>
       )}
 

@@ -35,6 +35,14 @@ class User(Base):
     )
     is_active = Column(Boolean, nullable=False, default=True)
     is_verified = Column(Boolean, nullable=False, default=False)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)
+    mfa_secret_encrypted = Column(String(1000), nullable=True)
+    mfa_recovery_codes = Column(JSON, nullable=True)
+    deletion_status = Column(String(20), nullable=False, default="active")
+    deletion_requested_at = Column(DateTime, nullable=True)
+    deletion_scheduled_at = Column(DateTime, nullable=True)
+    deletion_completed_at = Column(DateTime, nullable=True)
+    anonymized_at = Column(DateTime, nullable=True)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(
@@ -55,6 +63,8 @@ class RefreshToken(Base):
     revoked_at = Column(DateTime, nullable=True)
     user_agent = Column(String(500), nullable=True)
     ip_address = Column(String(45), nullable=True)
+    session_started_at = Column(DateTime, nullable=False, default=func.now())
+    last_used_at = Column(DateTime, nullable=False, default=func.now())
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="refresh_tokens")
@@ -87,19 +97,24 @@ class ProjectFileRecord(Base):
     __tablename__ = "files"
 
     id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
+    size = Column(BigInteger, nullable=False, default=0)
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    event_id = Column(String(36), nullable=True, unique=True, index=True)
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
     service_account_id = Column(String(36), ForeignKey("service_accounts.id", ondelete="SET NULL"), nullable=True)
     action = Column(String(50), nullable=False)
     resource_type = Column(String(20), nullable=False)
     resource_id = Column(String(36), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
     details_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
@@ -139,8 +154,24 @@ class ServiceAccount(Base):
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
-    created_by = Column(String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
     project = relationship("Project", back_populates="service_accounts")
+
+
+class AccountDeletionRequest(Base):
+    __tablename__ = "account_deletion_requests"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    status = Column(String(20), nullable=False, default="scheduled")
+    execute_after = Column(DateTime, nullable=False)
+    attempt_count = Column(BigInteger, nullable=False, default=0)
+    last_error = Column(String(1000), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

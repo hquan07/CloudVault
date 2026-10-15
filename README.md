@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688.svg)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-16.2.6-black.svg)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16.4.1-black.svg)](https://nextjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -23,8 +23,15 @@ and an operations plane for quota and object-integrity monitoring.
 
 - Streamed S3-compatible uploads to MinIO with file-version retention.
 - Personal folders, starred files, trash, sharing links and storage quota.
-- JWT access/refresh tokens, refresh rotation and Redis-backed revocation.
+- JWT access/refresh tokens, atomic refresh rotation, replay detection and
+  Redis-backed revocation.
+- Account Settings for profile/avatar, TOTP MFA with one-time recovery codes,
+  recent security activity, per-device session revocation, browser preferences
+  and privacy exports. Account deletion uses impact checks, project ownership
+  transfer, a seven-day cancellation window and asynchronous object cleanup.
 - Full-text search through authenticated Elasticsearch.
+- Responsive dashboard navigation and live, user-scoped storage analytics; the
+  UI never substitutes demonstration values when analytics is unavailable.
 - In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
 - Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events
   and real-time Redis/WebSocket notifications.
@@ -40,6 +47,10 @@ and an operations plane for quota and object-integrity monitoring.
   reservation.
 - Project folders, filters, per-user stars, bulk actions, preview, trash,
   archive/restore and audited lifecycle controls are available in the UI.
+- Each project provides its own `Integrations` and `Health / Operations` tabs;
+  multi-file/folder upload queues expose aggregate progress, retry and cancel.
+- Global search switches explicitly between personal storage and one accessible
+  project, preserving that scope in the URL.
 - E-commerce, News_Flow and Real-Time Stock clients connect through the shared
   gateway network without receiving direct MySQL or MinIO credentials.
 
@@ -48,10 +59,13 @@ and an operations plane for quota and object-integrity monitoring.
 - `project-operations` reconciles recorded usage, metadata and MinIO objects;
   detects stale uploads, missing/orphan objects and expired files.
 - Prometheus metrics, Grafana dashboard and Alertmanager rules cover project
-  quota, integrity and operation health.
+  quota, integrity, operation health and failed account-data purges.
 - OpenTelemetry traces from the API services are exported to Jaeger.
 - Backup, verification, restore-drill and selective project-recovery scripts are
   provided under `scripts/operations/`.
+- An optional HA overlay provides three Kafka brokers, four distributed MinIO
+  nodes and horizontally scaled API/worker replicas without changing the
+  lightweight development profile.
 
 ---
 
@@ -123,7 +137,7 @@ project authorization, storage semantics and operational recovery.
 
 | Domain | Technology | Purpose |
 |---|---|---|
-| Frontend | Next.js 16.2.6, React 19, TypeScript | UI, previews and interactive topology |
+| Frontend | Next.js 16.4.1, React 19, TypeScript | UI, previews and interactive topology |
 | Backend | Python 3.11, FastAPI 0.115.6, SQLAlchemy | Async API microservices |
 | Database | MySQL 8.0, asyncmy | Users, projects, metadata, versions and audit |
 | Cache and Pub/Sub | Redis 7 | JWT revocation and WebSocket notifications |
@@ -164,6 +178,35 @@ docker compose ps
 Access the application through Nginx at [http://localhost](http://localhost).
 The direct frontend port `3000` is bound to loopback for local debugging.
 
+### High-availability profile
+
+The default `docker-compose.yml` remains the development profile: one Kafka
+broker, one standalone MinIO node and one instance of each application service.
+For capacity and single-node failure testing, `docker-compose.ha.yml` adds:
+
+- a three-node ZooKeeper ensemble and three Kafka brokers with replication
+  factor 3, `min.insync.replicas=2` and unclean leader election disabled;
+- four distributed MinIO nodes on dedicated volumes;
+- configurable replicas for the frontend, APIs and Kafka workers; and
+- bounded Kafka retries, manual offset commits, idempotent side effects and a
+  dead-letter topic for poison events.
+
+Distributed MinIO cannot reuse the standalone `minio-data` volume. Back up and
+verify the existing MySQL/MinIO data, plan a controlled object migration, then
+explicitly acknowledge the mode change:
+
+```bash
+export CLOUDVAULT_HA_MODE_ACK=backup-and-migration-reviewed
+docker compose -f docker-compose.yml -f docker-compose.ha.yml config -q
+docker compose -f docker-compose.yml -f docker-compose.ha.yml up -d --build
+./scripts/operations/validate-ha.sh
+```
+
+Do not switch between standalone and distributed MinIO against the same data
+volume. The overlay improves process and disk failure tolerance on one Docker
+host; multi-host production resilience still requires an orchestrator,
+independent hosts and external backup/restore procedures.
+
 ### Run the frontend locally
 
 ```bash
@@ -185,7 +228,7 @@ bind to loopback; persistence and messaging services stay Docker-internal.
 | Next.js Frontend | `3000` | Loopback (`APP_BIND_ADDRESS`) | Direct frontend debugging |
 | Auth Service | `8001` | Loopback (`APP_BIND_ADDRESS`) | Users, projects, members and service accounts |
 | File Service | `8002` | Loopback (`APP_BIND_ADDRESS`) | Personal/project file and folder operations |
-| Metadata Service | `8003` | Loopback (`APP_BIND_ADDRESS`) | Sharing, search, activity and WebSocket API |
+| Metadata Service | `8003` | Loopback (`APP_BIND_ADDRESS`) | Sharing, scoped analytics, search, activity and WebSocket API |
 | MinIO API / Console | `9000` / `9001` | Loopback (`INFRA_BIND_ADDRESS`) | Object storage and administration |
 | Kibana | `5601` | Loopback (`INFRA_BIND_ADDRESS`) | Search administration |
 | Kafka UI | `8080` | Loopback (`INFRA_BIND_ADDRESS`) | Kafka administration |
@@ -194,6 +237,7 @@ bind to loopback; persistence and messaging services stay Docker-internal.
 | Alertmanager | `9093` | Loopback (`INFRA_BIND_ADDRESS`) | Quota, integrity and operation alerts |
 | Jaeger | `16686` | Loopback (`INFRA_BIND_ADDRESS`) | Distributed tracing UI |
 | Project Operations | None (`9100` internal) | Docker network only | Reconciliation/retention metrics and health |
+| Account Deletion Worker | None (`9101` internal) | Docker network only | Delayed personal-data purge metrics and health |
 | MySQL / Redis / Elasticsearch / Kafka / ZooKeeper | None | Docker network only | Internal data, cache, search and messaging |
 
 ## 🔐 Security Boundaries
@@ -202,12 +246,29 @@ bind to loopback; persistence and messaging services stay Docker-internal.
   different random value for every password and `JWT_SECRET_KEY`.
 - Browser users authenticate with JWTs. Project applications use independently
   revocable, scope-limited service tokens; CloudVault stores token hashes only.
+- Login, registration, refresh and public-share access have gateway limits;
+  authentication also applies an identity-aware Redis limit and records
+  security audit events.
+- Refresh tokens rotate atomically. Replaying a revoked refresh token revokes
+  the user's remaining refresh sessions, and password changes sign out every
+  refresh session.
 - MySQL, Redis, Elasticsearch, Kafka and ZooKeeper are only reachable through
   `cloudvault-network`.
 - `cloudvault-shared` exposes only the Nginx gateway to connected project
   uploader services. It does not expose MySQL, Redis or MinIO.
 - Elasticsearch uses separate bootstrap, Kibana and least-privilege application
   accounts. Redis, Grafana and MinIO require configured credentials.
+- Nginx adds baseline browser security headers and a request ID. FastAPI CORS
+  uses the `CORS_ALLOWED_ORIGINS` allowlist instead of a wildcard.
+- Notification WebSockets authenticate in their first frame so access tokens do
+  not appear in request URLs or access logs.
+- Account deletion is never a direct user-row delete: ownership blockers are
+  resolved first, sessions are revoked immediately, and a dedicated worker
+  purges personal objects before anonymizing identity data. Administrator
+  accounts are protected from this workflow; only `user` accounts can request
+  deletion.
+- Application containers run without Linux capabilities, cannot gain new
+  privileges, use non-root users, and mount development source read-only.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a
   firewall/private network protects access. Terminate TLS at Nginx or an
   upstream trusted proxy in production.
@@ -255,6 +316,19 @@ curl -fsS http://localhost/health/file
 curl -fsS http://localhost/health/metadata
 docker compose ps
 ```
+
+To exercise concurrent project uploads with unique idempotency keys, required
+metadata and checksums, use a temporary project or remove the generated test
+files afterwards:
+
+```bash
+export CLOUDVAULT_PROJECT_TOKEN='cvp_...'
+python3 scripts/load/concurrent_project_upload.py \
+  --project PROJECT_SLUG --requests 20 --workers 8
+```
+
+Add `--allow-quota-rejections` only when intentionally testing a near-full
+project and treating HTTP 413 as an expected hard-quota response.
 
 ---
 

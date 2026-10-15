@@ -1,0 +1,297 @@
+# CloudVault high-availability overlay.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.ha.yml up -d
+# Distributed MinIO uses dedicated volumes and never reuses standalone minio-data.
+
+x-kafka-cluster-environment: &kafka-cluster-environment
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181,zookeeper-2:2181,zookeeper-3:2181
+  KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
+
+x-zookeeper-environment: &zookeeper-environment
+  ZOOKEEPER_CLIENT_PORT: 2181
+  ZOOKEEPER_TICK_TIME: 2000
+  ZOOKEEPER_INIT_LIMIT: 10
+  ZOOKEEPER_SYNC_LIMIT: 5
+  ZOOKEEPER_SERVERS: zookeeper:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+  KAFKA_OPTS: -Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat,mntr
+  KAFKA_HEAP_OPTS: ${ZOOKEEPER_HEAP_OPTS:--Xms128m -Xmx256m}
+
+x-minio-environment: &minio-environment
+  CLOUDVAULT_HA_MODE_ACK: ${CLOUDVAULT_HA_MODE_ACK:?Set CLOUDVAULT_HA_MODE_ACK only after backup and standalone-to-distributed migration planning}
+  MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+  MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+  MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000}
+
+x-minio-command: &minio-command
+  - server
+  - http://minio/data
+  - http://minio-2/data
+  - http://minio-3/data
+  - http://minio-4/data
+  - --console-address
+  - :9001
+
+x-ha-app-environment: &ha-app-environment
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+  KAFKA_TOPIC_DEAD_LETTER: ${KAFKA_TOPIC_DEAD_LETTER:-dead-letter-events}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-5}
+  DB_POOL_RECYCLE_SECONDS: ${DB_POOL_RECYCLE_SECONDS:-1800}
+
+services:
+  zookeeper:
+    environment:
+      <<: *zookeeper-environment
+      ZOOKEEPER_SERVER_ID: 1
+    depends_on:
+      - zookeeper-2
+      - zookeeper-3
+    volumes: !override
+      - zookeeper-1-data:/var/lib/zookeeper/data
+      - zookeeper-1-log:/var/lib/zookeeper/log
+
+  zookeeper-2:
+    image: confluentinc/cp-zookeeper:7.5.0
+    restart: unless-stopped
+    environment:
+      <<: *zookeeper-environment
+      ZOOKEEPER_SERVER_ID: 2
+    volumes:
+      - zookeeper-2-data:/var/lib/zookeeper/data
+      - zookeeper-2-log:/var/lib/zookeeper/log
+    healthcheck: &zookeeper-healthcheck
+      test: ["CMD-SHELL", "echo srvr | nc localhost 2181 | grep -q Zookeeper"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [cloudvault-network]
+
+  zookeeper-3:
+    image: confluentinc/cp-zookeeper:7.5.0
+    restart: unless-stopped
+    environment:
+      <<: *zookeeper-environment
+      ZOOKEEPER_SERVER_ID: 3
+    volumes:
+      - zookeeper-3-data:/var/lib/zookeeper/data
+      - zookeeper-3-log:/var/lib/zookeeper/log
+    healthcheck: *zookeeper-healthcheck
+    networks: [cloudvault-network]
+
+  kafka:
+    environment:
+      <<: *kafka-cluster-environment
+      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+    depends_on: &kafka-zookeeper-dependencies
+      zookeeper:
+        condition: service_healthy
+      zookeeper-2:
+        condition: service_healthy
+      zookeeper-3:
+        condition: service_healthy
+    volumes: !override
+      - kafka-1-data:/var/lib/kafka/data
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    restart: unless-stopped
+    environment:
+      <<: *kafka-cluster-environment
+      KAFKA_BROKER_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29092
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+    depends_on: *kafka-zookeeper-dependencies
+    healthcheck: &kafka-healthcheck
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 45s
+    networks: [cloudvault-network]
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.5.0
+    restart: unless-stopped
+    environment:
+      <<: *kafka-cluster-environment
+      KAFKA_BROKER_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29092
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+    depends_on: *kafka-zookeeper-dependencies
+    healthcheck: *kafka-healthcheck
+    networks: [cloudvault-network]
+
+  kafka-init:
+    environment:
+      KAFKA_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_TOPIC_DEAD_LETTER: ${KAFKA_TOPIC_DEAD_LETTER:-dead-letter-events}
+    depends_on:
+      kafka: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      brokers=kafka:29092,kafka-2:29092,kafka-3:29092;
+      until kafka-topics --bootstrap-server $$brokers --list >/dev/null 2>&1; do sleep 3; done;
+      kafka-topics --create --if-not-exists --bootstrap-server $$brokers --topic ${KAFKA_TOPIC_FILE_EVENTS} --partitions 6 --replication-factor 3 --config min.insync.replicas=2;
+      kafka-topics --create --if-not-exists --bootstrap-server $$brokers --topic ${KAFKA_TOPIC_USER_EVENTS} --partitions 3 --replication-factor 3 --config min.insync.replicas=2;
+      kafka-topics --create --if-not-exists --bootstrap-server $$brokers --topic ${KAFKA_TOPIC_DEAD_LETTER:-dead-letter-events} --partitions 3 --replication-factor 3 --config min.insync.replicas=2;
+      kafka-topics --bootstrap-server $$brokers --describe;
+      "
+
+  kafka-ui:
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cloudvault-ha
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181,zookeeper-2:2181,zookeeper-3:2181
+    depends_on:
+      kafka: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+
+  minio:
+    command: *minio-command
+    environment: *minio-environment
+    volumes: !override
+      - minio-1-data:/data
+    depends_on: [minio-2, minio-3, minio-4]
+
+  minio-2:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: *minio-command
+    environment: *minio-environment
+    volumes: [minio-2-data:/data]
+    healthcheck: &minio-healthcheck
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    networks: [cloudvault-network]
+
+  minio-3:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: *minio-command
+    environment: *minio-environment
+    volumes: [minio-3-data:/data]
+    healthcheck: *minio-healthcheck
+    networks: [cloudvault-network]
+
+  minio-4:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: *minio-command
+    environment: *minio-environment
+    volumes: [minio-4-data:/data]
+    healthcheck: *minio-healthcheck
+    networks: [cloudvault-network]
+
+  minio-init:
+    depends_on:
+      minio: {condition: service_healthy}
+      minio-2: {condition: service_healthy}
+      minio-3: {condition: service_healthy}
+      minio-4: {condition: service_healthy}
+
+  frontend:
+    container_name: !reset null
+    ports: !reset []
+    deploy:
+      replicas: ${FRONTEND_REPLICAS:-2}
+
+  auth-service:
+    container_name: !reset null
+    ports: !reset []
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *ha-app-environment
+    deploy:
+      replicas: ${AUTH_SERVICE_REPLICAS:-2}
+
+  file-service:
+    container_name: !reset null
+    ports: !reset []
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *ha-app-environment
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      minio-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${FILE_SERVICE_REPLICAS:-2}
+
+  metadata-service:
+    container_name: !reset null
+    ports: !reset []
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *ha-app-environment
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${METADATA_SERVICE_REPLICAS:-2}
+
+  thumbnail-worker:
+    container_name: !reset null
+    environment: *ha-app-environment
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      minio-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${THUMBNAIL_WORKER_REPLICAS:-2}
+
+  search-indexer:
+    container_name: !reset null
+    environment: *ha-app-environment
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${SEARCH_INDEXER_REPLICAS:-2}
+
+  audit-logger:
+    container_name: !reset null
+    environment: *ha-app-environment
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${AUDIT_LOGGER_REPLICAS:-2}
+
+  zip-extractor-worker:
+    container_name: !reset null
+    environment: *ha-app-environment
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      minio-init: {condition: service_completed_successfully}
+    deploy:
+      replicas: ${ZIP_EXTRACTOR_REPLICAS:-2}
+
+volumes:
+  zookeeper-1-data:
+  zookeeper-1-log:
+  zookeeper-2-data:
+  zookeeper-2-log:
+  zookeeper-3-data:
+  zookeeper-3-log:
+  kafka-2-data:
+  kafka-3-data:
+  kafka-1-data:
+  minio-1-data:
+  minio-2-data:
+  minio-3-data:
+  minio-4-data:

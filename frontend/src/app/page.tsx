@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter } from 'next/navigation';
 import { Cloud, Lock, Shield, Zap } from 'lucide-react';
+import { ApiError, authApi } from '@/lib/api';
 
 export default function LandingPage() {
   const { user, login, register, loading } = useAuth();
@@ -14,6 +15,10 @@ export default function LandingPage() {
   const [username, setUsername] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [deletionPending, setDeletionPending] = useState(false);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     if (!loading && user) {
@@ -24,15 +29,37 @@ export default function LandingPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setSubmitting(true);
     try {
       if (isLogin) {
-        await login(email, password);
+        if (deletionPending) {
+          await authApi.cancelDeletion({
+            email,
+            current_password: password,
+            ...(mfaRequired && otpCode ? { mfa_code: otpCode } : {}),
+          });
+          setDeletionPending(false);
+          setMfaRequired(false);
+          setOtpCode('');
+          setPassword('');
+          setNotice('Account deletion cancelled. Sign in again to continue.');
+        } else {
+          await login(email, password, mfaRequired ? otpCode : undefined);
+        }
       } else {
         await register(email, username, password);
       }
-    } catch (err: any) {
-      setError(err.message || 'Authentication failed');
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409 && err.message === 'ACCOUNT_PENDING_DELETION') {
+        setDeletionPending(true);
+        setError('This account is scheduled for deletion. Confirm your credentials to cancel the request.');
+      } else if (err instanceof ApiError && err.status === 428) {
+        setMfaRequired(true);
+        setError('Enter the code from your authenticator app or a recovery code.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Authentication failed');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -103,6 +130,12 @@ export default function LandingPage() {
               {error}
             </div>
           )}
+
+          {notice && (
+            <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-300">
+              {notice}
+            </div>
+          )}
           
           <form onSubmit={handleSubmit} className="space-y-5">
             <div className={`overflow-hidden transition-all duration-500 ${!isLogin ? 'max-h-24 opacity-100 mb-5' : 'max-h-0 opacity-0 mb-0'}`}>
@@ -132,26 +165,45 @@ export default function LandingPage() {
               <input
                 type="password"
                 required
+                minLength={isLogin ? undefined : 12}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full bg-gray-950/50 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all placeholder:text-gray-600"
                 placeholder="••••••••"
               />
+              {!isLogin && <p className="mt-1.5 text-xs text-gray-500">Use at least 12 characters.</p>}
             </div>
+
+            {isLogin && mfaRequired && (
+              <div>
+                <label className="block text-sm font-medium text-gray-400 mb-1.5">Authentication code</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  required
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value.trim())}
+                  className="w-full bg-gray-950/50 border border-cyan-500/40 rounded-xl px-4 py-3 font-mono tracking-[0.3em] text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+                  placeholder="000000"
+                />
+                <p className="mt-1.5 text-xs text-gray-500">A six-digit TOTP or one unused recovery code.</p>
+              </div>
+            )}
             
             <button
               type="submit"
               disabled={submitting}
               className="w-full mt-8 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold py-3.5 px-4 rounded-xl transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-offset-2 focus:ring-offset-gray-900 shadow-lg shadow-cyan-900/30 disabled:opacity-50 disabled:cursor-not-allowed group-hover:shadow-cyan-900/50"
             >
-              {submitting ? 'Please wait...' : (isLogin ? 'Sign In' : 'Sign Up')}
+              {submitting ? 'Please wait...' : deletionPending ? 'Cancel account deletion' : (isLogin ? 'Sign In' : 'Sign Up')}
             </button>
           </form>
           
           <div className="mt-8 text-center text-sm text-gray-500">
             {isLogin ? "Don't have an account? " : "Already have an account? "}
             <button
-              onClick={() => { setIsLogin(!isLogin); setError(''); }}
+              onClick={() => { setIsLogin(!isLogin); setMfaRequired(false); setDeletionPending(false); setOtpCode(''); setError(''); setNotice(''); }}
               className="text-cyan-400 hover:text-cyan-300 font-semibold transition-colors relative after:content-[''] after:absolute after:w-full after:h-[1px] after:bg-cyan-400 after:bottom-0 after:left-0 after:scale-x-0 hover:after:scale-x-100 after:transition-transform after:origin-left"
             >
               {isLogin ? 'Sign up' : 'Log in'}

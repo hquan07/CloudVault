@@ -1,3 +1,9 @@
+x-runtime-hardening: &runtime-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   # DATABASE — MySQL 8.0
   mysql:
@@ -65,6 +71,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000}
     ports:
       - "${INFRA_BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT}:9000"
       - "${INFRA_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT}:9001"
@@ -135,6 +142,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_INSYNC_REPLICAS:-1}
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     volumes:
       - kafka-data:/var/lib/kafka/data
@@ -157,8 +169,9 @@ services:
     entrypoint: >
       /bin/sh -c "
       echo 'Creating Kafka topics...';
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_FILE_EVENTS} --partitions 3 --replication-factor 1;
-      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_USER_EVENTS} --partitions 3 --replication-factor 1;
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_FILE_EVENTS} --partitions 3 --replication-factor ${KAFKA_REPLICATION_FACTOR:-1} --config min.insync.replicas=${KAFKA_MIN_INSYNC_REPLICAS:-1};
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_USER_EVENTS} --partitions 3 --replication-factor ${KAFKA_REPLICATION_FACTOR:-1} --config min.insync.replicas=${KAFKA_MIN_INSYNC_REPLICAS:-1};
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ${KAFKA_TOPIC_DEAD_LETTER:-dead-letter-events} --partitions 3 --replication-factor ${KAFKA_REPLICATION_FACTOR:-1} --config min.insync.replicas=${KAFKA_MIN_INSYNC_REPLICAS:-1};
       echo 'Kafka topics created successfully!';
       kafka-topics --list --bootstrap-server kafka:29092;
       "
@@ -336,6 +349,7 @@ services:
 
   # FRONTEND SERVICE
   frontend:
+    <<: *runtime-hardening
     build: ./frontend
     container_name: cloudvault-frontend
     restart: unless-stopped
@@ -347,6 +361,7 @@ services:
 
   # BACKEND SERVICES
   auth-service:
+    <<: *runtime-hardening
     build: ./services/auth-service
     container_name: cloudvault-auth
     restart: unless-stopped
@@ -356,7 +371,7 @@ services:
     ports:
       - "${APP_BIND_ADDRESS:-127.0.0.1}:8001:8000"
     volumes:
-      - ./services/auth-service:/app
+      - ./services/auth-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -366,6 +381,7 @@ services:
       - cloudvault-network
 
   file-service:
+    <<: *runtime-hardening
     build: ./services/file-service
     container_name: cloudvault-files
     restart: unless-stopped
@@ -377,7 +393,7 @@ services:
     extra_hosts:
       - "localhost:host-gateway"
     volumes:
-      - ./services/file-service:/app
+      - ./services/file-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -391,6 +407,7 @@ services:
       - cloudvault-network
 
   metadata-service:
+    <<: *runtime-hardening
     build: ./services/metadata-service
     container_name: cloudvault-metadata
     restart: unless-stopped
@@ -400,7 +417,7 @@ services:
     ports:
       - "${APP_BIND_ADDRESS:-127.0.0.1}:8003:8000"
     volumes:
-      - ./services/metadata-service:/app
+      - ./services/metadata-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -413,12 +430,16 @@ services:
 
   # KAFKA WORKERS
   thumbnail-worker:
-    build: ./workers/thumbnail-worker
+    <<: *runtime-hardening
+    build:
+      context: .
+      dockerfile: workers/thumbnail-worker/Dockerfile
     container_name: cloudvault-thumbnail-worker
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/thumbnail-worker:/app
+      - ./workers/thumbnail-worker/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -430,12 +451,16 @@ services:
       - cloudvault-network
 
   search-indexer:
-    build: ./workers/search-indexer
+    <<: *runtime-hardening
+    build:
+      context: .
+      dockerfile: workers/search-indexer/Dockerfile
     container_name: cloudvault-search-indexer
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/search-indexer:/app
+      - ./workers/search-indexer/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -447,12 +472,16 @@ services:
       - cloudvault-network
 
   audit-logger:
-    build: ./workers/audit-logger
+    <<: *runtime-hardening
+    build:
+      context: .
+      dockerfile: workers/audit-logger/Dockerfile
     container_name: cloudvault-audit-logger
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/audit-logger:/app
+      - ./workers/audit-logger/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -462,12 +491,13 @@ services:
       - cloudvault-network
 
   project-operations:
+    <<: *runtime-hardening
     build: ./workers/project-operations
     container_name: cloudvault-project-operations
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/project-operations:/app
+      - ./workers/project-operations:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -482,11 +512,39 @@ services:
     networks:
       - cloudvault-network
 
+  account-deletion-worker:
+    <<: *runtime-hardening
+    build: ./workers/account-deletion
+    container_name: cloudvault-account-deletion
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/account-deletion:/app:ro
+    depends_on:
+      mysql-migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9101/metrics', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - cloudvault-network
+
   zip-extractor-worker:
-    build: ./workers/zip-extractor-worker
+    <<: *runtime-hardening
+    build:
+      context: .
+      dockerfile: workers/zip-extractor-worker/Dockerfile
     container_name: cloudvault-zip-extractor
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - ./workers/zip-extractor-worker/main.py:/app/main.py:ro
+      - ./workers/common:/app/common:ro
     depends_on:
       kafka:
         condition: service_healthy

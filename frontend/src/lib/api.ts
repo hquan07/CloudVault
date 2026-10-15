@@ -37,6 +37,8 @@ function clearTokens() {
   localStorage.removeItem('cloudvault_refresh_token');
 }
 
+let refreshInFlight: Promise<boolean> | null = null;
+
 async function request<T = unknown>(
   url: string,
   options: RequestInit = {},
@@ -84,7 +86,7 @@ async function request<T = unknown>(
   return await res.json();
 }
 
-async function refreshAccessToken(): Promise<boolean> {
+async function performRefresh(): Promise<boolean> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) return false;
   try {
@@ -105,12 +107,65 @@ async function refreshAccessToken(): Promise<boolean> {
   return false;
 }
 
+async function refreshAccessToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+export interface AuthSession {
+  id: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+  session_started_at: string;
+  last_active_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
+export interface SecurityEvent {
+  id: string;
+  action: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+}
+
+export interface MfaSetup {
+  secret: string;
+  otpauth_uri: string;
+}
+
+export interface AccountDeletionImpact {
+  deletion_status: 'active' | 'pending' | 'purging' | 'failed' | 'deleted';
+  can_delete: boolean;
+  blockers: string[];
+  personal_file_count: number;
+  personal_storage_bytes: number;
+  owned_projects: Array<{ id: string; slug: string; name: string }>;
+  project_membership_count: number;
+  active_shared_link_count: number;
+  active_session_count: number;
+  created_service_account_count: number;
+  scheduled_for: string | null;
+}
+
+export interface AccountDeletionStatus {
+  detail: string;
+  status: string;
+  scheduled_for: string | null;
+}
+
 /* ── Auth API ── */
 export const authApi = {
   register: (data: { email: string; username: string; password: string }) =>
     request(`${AUTH_BASE}/auth/register`, { method: 'POST', body: JSON.stringify(data) }, false),
 
-  login: (data: { email: string; password: string }) =>
+  login: (data: { email: string; password: string; otp_code?: string }) =>
     request(`${AUTH_BASE}/auth/login`, { method: 'POST', body: JSON.stringify(data) }, false),
 
   logout: () => {
@@ -125,6 +180,50 @@ export const authApi = {
 
   updateProfile: (data: { username?: string; avatar_url?: string }) =>
     request(`${AUTH_BASE}/auth/me`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/change-password`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  setupMfa: (currentPassword: string) =>
+    request<MfaSetup>(`${AUTH_BASE}/auth/mfa/setup`, {
+      method: 'POST', body: JSON.stringify({ current_password: currentPassword }),
+    }),
+
+  enableMfa: (code: string) =>
+    request<{ detail: string; recovery_codes: string[] }>(`${AUTH_BASE}/auth/mfa/enable`, {
+      method: 'POST', body: JSON.stringify({ code }),
+    }),
+
+  disableMfa: (currentPassword: string, code: string) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/mfa/disable`, {
+      method: 'POST', body: JSON.stringify({ current_password: currentPassword, code }),
+    }),
+
+  listSessions: () => request<AuthSession[]>(`${AUTH_BASE}/auth/sessions`),
+
+  listSecurityEvents: () => request<SecurityEvent[]>(`${AUTH_BASE}/auth/security-events`),
+
+  revokeSession: (sessionId: string) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/sessions/${sessionId}`, { method: 'DELETE' }),
+
+  revokeAllSessions: () =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/sessions`, { method: 'DELETE' }),
+
+  getDeletionImpact: () =>
+    request<AccountDeletionImpact>(`${AUTH_BASE}/auth/account/deletion-impact`),
+
+  requestDeletion: (data: { current_password: string; confirmation: string; mfa_code?: string }) =>
+    request<AccountDeletionStatus>(`${AUTH_BASE}/auth/account/deletion-request`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  cancelDeletion: (data: { email: string; current_password: string; mfa_code?: string }) =>
+    request<AccountDeletionStatus>(`${AUTH_BASE}/auth/account/deletion-cancel`, {
+      method: 'POST', body: JSON.stringify(data),
+    }, false),
 };
 
 /* ── File API ── */
@@ -323,6 +422,21 @@ export interface AuditActivity {
   created_at: string;
 }
 
+export interface AnalyticsStats {
+  generated_at: string;
+  scope: { personal: boolean; project_count: number };
+  cards: {
+    total_storage_bytes: number;
+    active_files: number;
+    starred_files: number;
+    active_shares: number;
+    trash_bytes: number;
+  };
+  file_types: { name: string; value: number; color: string }[];
+  upload_activity: { time: string; uploads: number }[];
+  storage_growth: { day: string; date: string; storage_bytes: number }[];
+}
+
 export interface ProjectMember {
   id: string;
   project_id: string;
@@ -331,6 +445,27 @@ export interface ProjectMember {
   username: string;
   email: string;
   created_at: string;
+}
+
+export interface ProjectMemberCandidate {
+  id: string;
+  username: string;
+  email: string;
+}
+
+export interface ProjectUploadSession {
+  session_id: string;
+  project_id: string;
+  status: 'PENDING' | 'AVAILABLE' | 'FAILED';
+  original_name: string;
+  mime_type: string;
+  file_size: number;
+  folder_id: string | null;
+  part_size: number;
+  part_count: number;
+  expires_at: string;
+  file?: ProjectFile;
+  idempotent_replay?: boolean;
 }
 
 export interface ServiceAccount {
@@ -424,8 +559,8 @@ export const projectApi = {
     onProgress: (percent: number) => void,
     signal?: AbortSignal,
     folderId?: string | null,
+    idempotencyKey = crypto.randomUUID(),
   ) => {
-    const idempotencyKey = crypto.randomUUID();
     const uploadOnce = () => new Promise<ProjectFile>((resolve, reject) => {
       const formData = new FormData();
       formData.append('file', file, file.name);
@@ -461,6 +596,92 @@ export const projectApi = {
       if (error instanceof ApiError && error.status === 401 && await refreshAccessToken()) {
         return uploadOnce();
       }
+      throw error;
+    }
+  },
+
+  uploadMultipartWithProgress: async (
+    projectId: string,
+    file: File,
+    metadata: Record<string, unknown>,
+    onProgress: (percent: number) => void,
+    signal?: AbortSignal,
+    folderId?: string | null,
+    idempotencyKey = crypto.randomUUID(),
+  ) => {
+    const session = await request<ProjectUploadSession>(
+      `${FILE_BASE}/projects/${projectId}/upload-sessions`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({
+          original_name: file.name,
+          mime_type: file.type || 'application/octet-stream',
+          file_size: file.size,
+          folder_id: folderId || null,
+          metadata,
+        }),
+        signal,
+      },
+    );
+    if (session.file) return session.file;
+
+    const loadedByPart = new Map<number, number>();
+    const completedParts: { part_number: number; etag: string }[] = [];
+    const updateProgress = (partNumber: number, loaded: number) => {
+      loadedByPart.set(partNumber, loaded);
+      const totalLoaded = [...loadedByPart.values()].reduce((sum, value) => sum + value, 0);
+      onProgress(Math.min(99, Math.round((totalLoaded / file.size) * 100)));
+    };
+    const uploadPart = async (partNumber: number) => {
+      if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError');
+      const { url } = await request<{ url: string }>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}/parts/${partNumber}`,
+        { signal },
+      );
+      const start = (partNumber - 1) * session.part_size;
+      const chunk = file.slice(start, Math.min(start + session.part_size, file.size));
+      const etag = await new Promise<string>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url);
+        xhr.upload.onprogress = (event) => updateProgress(partNumber, event.loaded);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const value = xhr.getResponseHeader('ETag');
+            if (value) resolve(value.replaceAll('"', ''));
+            else reject(new ApiError('Object storage did not return a part ETag', xhr.status));
+          } else reject(new ApiError('Object storage rejected an upload part', xhr.status));
+        };
+        xhr.onerror = () => reject(new ApiError('Network error during multipart upload', 0));
+        xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'));
+        signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+        xhr.send(chunk);
+      });
+      updateProgress(partNumber, chunk.size);
+      completedParts.push({ part_number: partNumber, etag });
+    };
+
+    try {
+      let nextPart = 1;
+      const workers = Array.from({ length: Math.min(3, session.part_count) }, async () => {
+        while (nextPart <= session.part_count) {
+          const partNumber = nextPart++;
+          await uploadPart(partNumber);
+        }
+      });
+      await Promise.all(workers);
+      completedParts.sort((a, b) => a.part_number - b.part_number);
+      const completed = await request<ProjectFile>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}/complete`,
+        { method: 'POST', body: JSON.stringify({ parts: completedParts }), signal },
+      );
+      onProgress(100);
+      return completed;
+    } catch (error) {
+      await request<void>(
+        `${FILE_BASE}/projects/${projectId}/upload-sessions/${session.session_id}`,
+        { method: 'DELETE' },
+      ).catch(() => undefined);
       throw error;
     }
   },
@@ -547,6 +768,11 @@ export const projectApi = {
   listMembers: (projectId: string) =>
     request<ProjectMember[]>(`${AUTH_BASE}/projects/${projectId}/members`),
 
+  searchMemberCandidates: (projectId: string, query: string) =>
+    request<ProjectMemberCandidate[]>(
+      `${AUTH_BASE}/projects/${projectId}/member-candidates?q=${encodeURIComponent(query)}`,
+    ),
+
   addMember: (projectId: string, userId: string, role: ProjectMember['role']) =>
     request<ProjectMember>(`${AUTH_BASE}/projects/${projectId}/members`, {
       method: 'POST', body: JSON.stringify({ user_id: userId, role }),
@@ -560,10 +786,15 @@ export const projectApi = {
   removeMember: (projectId: string, memberId: string) =>
     request(`${AUTH_BASE}/projects/${projectId}/members/${memberId}`, { method: 'DELETE' }),
 
+  transferOwnership: (projectId: string, newOwnerUserId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/transfer-ownership`, {
+      method: 'POST', body: JSON.stringify({ new_owner_user_id: newOwnerUserId }),
+    }),
+
   listServiceAccounts: (projectId: string) =>
     request<ServiceAccount[]>(`${AUTH_BASE}/projects/${projectId}/service-accounts`),
 
-  createServiceAccount: (projectId: string, data: { name: string; scopes: string[] }) =>
+  createServiceAccount: (projectId: string, data: { name: string; scopes: string[]; expires_at?: string }) =>
     request<ServiceAccount>(`${AUTH_BASE}/projects/${projectId}/service-accounts`, {
       method: 'POST', body: JSON.stringify(data),
     }),
@@ -603,11 +834,14 @@ export const metaApi = {
 
   getStorage: () => request(`${META_BASE}/metadata/storage`),
 
+  getAnalytics: () => request<AnalyticsStats>(`${META_BASE}/analytics/stats`),
+
   search: (params: {
     q: string; page?: number; pageSize?: number; mimeType?: string;
     minSize?: number; maxSize?: number; dateFrom?: string; dateTo?: string;
     sortBy?: 'relevance' | 'created_at' | 'updated_at' | 'size' | 'original_name';
     sortOrder?: 'asc' | 'desc';
+    projectId?: string;
   }) => {
     const qs = new URLSearchParams();
     qs.set('q', params.q);
@@ -620,6 +854,7 @@ export const metaApi = {
     if (params.dateTo) qs.set('date_to', params.dateTo);
     if (params.sortBy) qs.set('sort_by', params.sortBy);
     if (params.sortOrder) qs.set('sort_order', params.sortOrder);
+    if (params.projectId) qs.set('project_id', params.projectId);
     return request(`${META_BASE}/search/?${qs.toString()}`);
   },
 

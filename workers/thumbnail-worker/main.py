@@ -12,12 +12,13 @@ import logging
 import subprocess
 import tempfile
 
-from aiokafka import AIOKafkaConsumer
 from minio import Minio
 from PIL import Image
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
 import redis.asyncio as aioredis
+
+from common.reliable_kafka import build_consumer, consume_reliably
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [ThumbnailWorker] %(message)s")
 logger = logging.getLogger(__name__)
@@ -119,91 +120,79 @@ async def main():
     
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
-    consumer = AIOKafkaConsumer(
-        KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        group_id="thumbnail-worker",
-        auto_offset_reset="earliest",
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    )
-    await consumer.start()
-    logger.info("Listening for file events...")
+    def read_object(object_key: str) -> bytes:
+        response = minio_client.get_object(BUCKET_FILES, object_key)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
 
+    def put_thumbnail(object_key: str, thumbnail: bytes) -> None:
+        minio_client.put_object(
+            BUCKET_THUMBNAILS,
+            object_key,
+            io.BytesIO(thumbnail),
+            length=len(thumbnail),
+            content_type="image/jpeg",
+        )
+
+    async def handle_event(data: dict) -> None:
+        if data.get("event") != "FILE_UPLOADED":
+            return
+
+        mime_type = data.get("mime_type", "")
+        if mime_type not in IMAGE_MIMES and mime_type not in VIDEO_MIMES:
+            return
+
+        file_id = data.get("file_id")
+        minio_key = data.get("minio_key")
+        if not file_id or not minio_key:
+            raise ValueError("FILE_UPLOADED event is missing file_id or minio_key")
+
+        logger.info("Generating thumbnail for %s", file_id)
+        file_data = await asyncio.to_thread(read_object, minio_key)
+        generator = generate_video_thumbnail if mime_type in VIDEO_MIMES else generate_thumbnail
+        thumb_data = await asyncio.to_thread(generator, file_data)
+        if not thumb_data:
+            raise ValueError(f"Thumbnail generation returned no data for {file_id}")
+
+        thumb_key = f"thumb_{file_id}.jpg"
+        await asyncio.to_thread(put_thumbnail, thumb_key, thumb_data)
+
+        async with session_factory() as session:
+            await session.execute(
+                text("UPDATE files SET thumbnail_key = :key WHERE id = :fid"),
+                {"key": thumb_key, "fid": file_id},
+            )
+            await session.commit()
+
+        logger.info("Thumbnail created: %s", thumb_key)
+        user_id = data.get("user_id")
+        if user_id:
+            try:
+                await redis_client.publish(
+                    f"notifications:{user_id}",
+                    json.dumps({
+                        "type": "THUMBNAIL_READY",
+                        "file_id": file_id,
+                        "message": f"Ảnh bìa cho {data.get('filename', 'video')} đã sẵn sàng!"
+                    })
+                )
+            except Exception:
+                logger.exception("Failed to publish thumbnail notification")
+
+    consumer = build_consumer(KAFKA_TOPIC, group_id="thumbnail-worker")
     try:
-        async for msg in consumer:
-            data = msg.value
-            event = data.get("event")
-            if event != "FILE_UPLOADED":
-                continue
-
-            mime_type = data.get("mime_type", "")
-            if mime_type not in IMAGE_MIMES and mime_type not in VIDEO_MIMES:
-                continue
-
-            file_id = data.get("file_id")
-            minio_key = data.get("minio_key")
-            if not file_id or not minio_key:
-                continue
-
-            logger.info(f"Generating thumbnail for {file_id}...")
-
-            try:
-                resp = minio_client.get_object(BUCKET_FILES, minio_key)
-                file_data = resp.read()
-                resp.close()
-            except Exception as e:
-                logger.error(f"Failed to fetch from MinIO: {e}")
-                continue
-
-            if mime_type in VIDEO_MIMES:
-                thumb_data = generate_video_thumbnail(file_data)
-            else:
-                thumb_data = generate_thumbnail(file_data)
-                
-            if not thumb_data:
-                continue
-
-            thumb_key = f"thumb_{file_id}.jpg"
-            try:
-                minio_client.put_object(
-                    BUCKET_THUMBNAILS,
-                    thumb_key,
-                    io.BytesIO(thumb_data),
-                    length=len(thumb_data),
-                    content_type="image/jpeg",
-                )
-            except Exception as e:
-                logger.error(f"Failed to upload thumbnail: {e}")
-                continue
-
-            # Update file record with thumbnail_key
-            async with session_factory() as session:
-                await session.execute(
-                    text("UPDATE files SET thumbnail_key = :key WHERE id = :fid"),
-                    {"key": thumb_key, "fid": file_id},
-                )
-                await session.commit()
-
-            logger.info(f"Thumbnail created: {thumb_key}")
-            
-            user_id = data.get("user_id")
-            if user_id:
-                try:
-                    await redis_client.publish(
-                        f"notifications:{user_id}",
-                        json.dumps({
-                            "type": "THUMBNAIL_READY",
-                            "file_id": file_id,
-                            "message": f"Ảnh bìa cho {data.get('filename', 'video')} đã sẵn sàng!"
-                        })
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to publish to redis: {e}")
-
+        await consume_reliably(
+            consumer,
+            handle_event,
+            group_id="thumbnail-worker",
+            logger=logger,
+        )
     finally:
-        await consumer.stop()
         await engine.dispose()
-        await redis_client.close()
+        await redis_client.aclose()
 
 
 if __name__ == "__main__":

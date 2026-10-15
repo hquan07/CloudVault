@@ -143,6 +143,11 @@ class ProjectOperations:
             return 0
         stale_before = datetime.now(timezone.utc) - timedelta(minutes=self.settings.stale_upload_minutes)
         with db.cursor() as cursor:
+            # Match the API lock order: project first, then upload rows.
+            cursor.execute(
+                "SELECT id FROM projects WHERE id=%s FOR UPDATE",
+                (project["id"],),
+            )
             cursor.execute(
                 """
                 SELECT id, object_key, reserved_bytes
@@ -191,7 +196,7 @@ class ProjectOperations:
             soft_deleted = cursor.rowcount
             cursor.execute(
                 """
-                SELECT id, minio_bucket, minio_key, size, thumbnail_key
+                SELECT id
                 FROM files
                 WHERE project_id=%s AND status='DELETED' AND is_deleted=TRUE
                   AND retention_until IS NOT NULL AND retention_until <= %s
@@ -204,23 +209,71 @@ class ProjectOperations:
 
         purged = 0
         for stored in files:
-            with db.cursor() as cursor:
-                cursor.execute(
-                    "SELECT minio_key, size FROM file_versions WHERE file_id=%s",
-                    (stored["id"],),
-                )
-                versions = cursor.fetchall()
-            objects = {(stored["minio_bucket"], stored["minio_key"]): int(stored["size"] or 0)}
-            for version in versions:
-                objects[(stored["minio_bucket"], version["minio_key"])] = int(version["size"] or 0)
-            if not all(self._remove_object(bucket, key) for bucket, key in objects):
-                continue
-            if stored["thumbnail_key"]:
-                self._remove_object(self.settings.thumbnails_bucket, stored["thumbnail_key"])
-            released = sum(objects.values())
             try:
                 with db.cursor() as cursor:
-                    cursor.execute("DELETE FROM files WHERE id=%s", (stored["id"],))
+                    # Match permanent-delete lock ordering and re-check that the
+                    # retention candidate is still eligible after waiting.
+                    cursor.execute(
+                        "SELECT id FROM projects WHERE id=%s FOR UPDATE",
+                        (project["id"],),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT id, minio_bucket, minio_key, size, thumbnail_key
+                        FROM files
+                        WHERE id=%s AND project_id=%s
+                          AND status='DELETED' AND is_deleted=TRUE
+                          AND retention_until IS NOT NULL AND retention_until <= %s
+                          AND deleted_at <= %s
+                        FOR UPDATE
+                        """,
+                        (stored["id"], project["id"], now, purge_before),
+                    )
+                    locked_file = cursor.fetchone()
+                    if not locked_file:
+                        db.rollback()
+                        continue
+                    cursor.execute(
+                        "SELECT minio_key, size FROM file_versions WHERE file_id=%s",
+                        (locked_file["id"],),
+                    )
+                    versions = cursor.fetchall()
+
+                objects = {
+                    (locked_file["minio_bucket"], locked_file["minio_key"]):
+                        int(locked_file["size"] or 0)
+                }
+                for version in versions:
+                    objects[(locked_file["minio_bucket"], version["minio_key"])] = int(
+                        version["size"] or 0
+                    )
+                objects_removed = all(
+                    self._remove_object(bucket, key) for bucket, key in objects
+                )
+                thumbnail_removed = (
+                    not locked_file["thumbnail_key"]
+                    or self._remove_object(
+                        self.settings.thumbnails_bucket,
+                        locked_file["thumbnail_key"],
+                    )
+                )
+                if not objects_removed or not thumbnail_removed:
+                    db.rollback()
+                    continue
+
+                released = sum(objects.values())
+                with db.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        DELETE FROM files
+                        WHERE id=%s AND project_id=%s
+                          AND status='DELETED' AND is_deleted=TRUE
+                        """,
+                        (locked_file["id"], project["id"]),
+                    )
+                    if cursor.rowcount != 1:
+                        db.rollback()
+                        continue
                     cursor.execute(
                         "UPDATE projects SET storage_used=GREATEST(0, storage_used-%s) WHERE id=%s",
                         (released, project["id"]),
