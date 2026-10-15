@@ -87,7 +87,18 @@ class SessionResponse(BaseModel):
     ip_address: Optional[str] = None
     user_agent: Optional[str] = None
     created_at: datetime
+    session_started_at: datetime
+    last_active_at: datetime
     expires_at: datetime
+    is_current: bool = False
+
+
+class SecurityEventResponse(BaseModel):
+    id: str
+    action: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: datetime
 
 
 class ProjectCreateRequest(BaseModel):

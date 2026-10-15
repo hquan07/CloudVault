@@ -50,7 +50,7 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # ── JWT tokens ──
 
-def create_access_token(user_id: str, email: str) -> str:
+def create_access_token(user_id: str, email: str, session_id: str | None = None) -> str:
     payload = {
         "sub": user_id,
         "email": email,
@@ -60,6 +60,8 @@ def create_access_token(user_id: str, email: str) -> str:
         "iat": datetime.now(timezone.utc),
         "jti": str(uuid.uuid4()),
     }
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

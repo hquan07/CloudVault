@@ -121,7 +121,18 @@ export interface AuthSession {
   ip_address: string | null;
   user_agent: string | null;
   created_at: string;
+  session_started_at: string;
+  last_active_at: string;
   expires_at: string;
+  is_current: boolean;
+}
+
+export interface SecurityEvent {
+  id: string;
+  action: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
 }
 
 /* ── Auth API ── */
@@ -152,6 +163,8 @@ export const authApi = {
     }),
 
   listSessions: () => request<AuthSession[]>(`${AUTH_BASE}/auth/sessions`),
+
+  listSecurityEvents: () => request<SecurityEvent[]>(`${AUTH_BASE}/auth/security-events`),
 
   revokeSession: (sessionId: string) =>
     request<{ detail: string }>(`${AUTH_BASE}/auth/sessions/${sessionId}`, { method: 'DELETE' }),

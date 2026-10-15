@@ -55,6 +55,8 @@ class RefreshToken(Base):
     revoked_at = Column(DateTime, nullable=True)
     user_agent = Column(String(500), nullable=True)
     ip_address = Column(String(45), nullable=True)
+    session_started_at = Column(DateTime, nullable=False, default=func.now())
+    last_used_at = Column(DateTime, nullable=False, default=func.now())
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="refresh_tokens")

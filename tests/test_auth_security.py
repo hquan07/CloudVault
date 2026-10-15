@@ -78,6 +78,12 @@ class AuthenticationSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), token_hash)
         self.assertGreater(expires_at.timestamp(), 0)
 
+    def test_access_token_tracks_refresh_session(self):
+        token = auth.create_access_token("user-1", "user@example.com", "session-1")
+        payload = auth.decode_access_token(token)
+        self.assertEqual(payload["sub"], "user-1")
+        self.assertEqual(payload["sid"], "session-1")
+
 
 if __name__ == "__main__":
     unittest.main()

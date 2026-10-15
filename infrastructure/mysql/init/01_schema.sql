@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     revoked_at TIMESTAMP NULL,
     user_agent VARCHAR(500),
     ip_address VARCHAR(45),
+    session_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
     INDEX idx_refresh_tokens_user (user_id),

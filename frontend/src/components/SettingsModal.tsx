@@ -1,22 +1,27 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
   BadgeCheck,
   CalendarDays,
   Check,
+  CircleCheck,
+  Clock3,
   HardDrive,
   KeyRound,
   Loader2,
   LogOut,
   Mail,
   MonitorSmartphone,
+  RefreshCw,
   Save,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   User as UserIcon,
   X,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
-import { ApiError, AuthSession, authApi } from '@/lib/api';
+import { ApiError, AuthSession, SecurityEvent, authApi } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 
 interface SettingsModalProps {
@@ -39,6 +44,20 @@ function describeAgent(userAgent: string | null) {
   return userAgent.slice(0, 80);
 }
 
+function securityActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    USER_REGISTERED: 'Account registered',
+    USER_LOGGED_IN: 'Signed in',
+    USER_LOGIN_FAILED: 'Sign-in attempt failed',
+    USER_LOGGED_OUT: 'Signed out',
+    PASSWORD_CHANGED: 'Password changed',
+    SESSION_REVOKED: 'Session revoked',
+    SESSIONS_REVOKED: 'All sessions revoked',
+    REFRESH_TOKEN_REPLAYED: 'Suspicious session replay blocked',
+  };
+  return labels[action] || action.replaceAll('_', ' ').toLowerCase();
+}
+
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const { user, refreshUser, logout } = useAuth();
   const [section, setSection] = useState<SettingsSection>('profile');
@@ -53,6 +72,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [sessions, setSessions] = useState<AuthSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
   const resetMessages = () => {
@@ -71,14 +92,25 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   }, []);
 
+  const loadSecurityEvents = useCallback(async () => {
+    setEventsLoading(true);
+    try {
+      setSecurityEvents(await authApi.listSecurityEvents());
+    } catch (loadError: unknown) {
+      setError(errorMessage(loadError, 'Failed to load security activity'));
+    } finally {
+      setEventsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const handleEsc = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleEsc);
-    void loadSessions();
+    void Promise.all([loadSessions(), loadSecurityEvents()]);
     return () => window.removeEventListener('keydown', handleEsc);
-  }, [loadSessions, onClose]);
+  }, [loadSecurityEvents, loadSessions, onClose]);
 
   if (!user) return null;
 
@@ -128,13 +160,22 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  const revokeSession = async (sessionId: string) => {
-    setRevokingId(sessionId);
+  const revokeSession = async (session: AuthSession) => {
+    const warning = session.is_current
+      ? 'Sign out this browser? You will need to sign in again.'
+      : `Revoke the ${describeAgent(session.user_agent)} session?`;
+    if (!window.confirm(warning)) return;
+    setRevokingId(session.id);
     resetMessages();
     try {
-      await authApi.revokeSession(sessionId);
-      setSessions((current) => current.filter((session) => session.id !== sessionId));
+      await authApi.revokeSession(session.id);
+      if (session.is_current) {
+        await logout();
+        return;
+      }
+      setSessions((current) => current.filter((item) => item.id !== session.id));
       setSuccess('Session revoked. Its access token may remain valid for up to 30 minutes.');
+      void loadSecurityEvents();
     } catch (revokeError: unknown) {
       setError(errorMessage(revokeError, 'Failed to revoke session'));
     } finally {
@@ -171,6 +212,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const profileUnchanged = username.trim() === user.username
     && avatarUrl.trim() === (user.avatar_url || '');
   const initials = user.username.slice(0, 2).toUpperCase();
+  const passwordRules = [
+    { label: 'At least 12 characters', met: newPassword.length >= 12 },
+    { label: 'Contains an uppercase letter', met: /[A-Z]/.test(newPassword) },
+    { label: 'Contains a lowercase letter', met: /[a-z]/.test(newPassword) },
+    { label: 'Contains a number or symbol', met: /[^A-Za-z]/.test(newPassword) },
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -253,19 +300,34 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             )}
 
             {section === 'security' && (
-              <form onSubmit={changePassword} className="mx-auto max-w-xl space-y-5">
-                <div><h3 className="flex items-center gap-2 text-xl font-semibold text-white"><KeyRound className="text-cyan-400" size={21} />Change password</h3><p className="mt-1 text-sm text-gray-500">Changing it revokes every refresh session and requires signing in again.</p></div>
-                <label className="block text-sm text-gray-400">Current password<input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label>
-                <label className="block text-sm text-gray-400">New password<input type="password" autoComplete="new-password" required minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /><span className="mt-1 block text-xs text-gray-600">At least 12 characters.</span></label>
-                <label className="block text-sm text-gray-400">Confirm new password<input type="password" autoComplete="new-password" required minLength={12} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label>
-                <div className="flex justify-end border-t border-gray-800 pt-5"><button disabled={saving} className="flex items-center gap-2 rounded-xl bg-cyan-500 px-5 py-2.5 font-semibold text-gray-950 disabled:opacity-50">{saving ? <Loader2 size={17} className="animate-spin" /> : <KeyRound size={17} />} Change password</button></div>
-              </form>
+              <div className="mx-auto max-w-2xl space-y-6">
+                <div><h3 className="text-xl font-semibold text-white">Sign-in security</h3><p className="mt-1 text-sm text-gray-500">Review your account protection and recent security activity.</p></div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><BadgeCheck size={15} /> Identity</div><p className="mt-2 text-sm font-medium text-emerald-300">{user.is_verified ? 'Verified' : 'Not verified'}</p></div>
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><KeyRound size={15} /> Sign-in method</div><p className="mt-2 capitalize text-sm font-medium text-gray-200">{user.oauth_provider}</p></div>
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><Clock3 size={15} /> Last sign-in</div><p className="mt-2 text-sm font-medium text-gray-200">{user.last_login_at ? new Date(user.last_login_at).toLocaleString() : 'Not recorded'}</p></div>
+                </div>
+
+                <form onSubmit={changePassword} className="space-y-5 rounded-2xl border border-gray-800 bg-gray-950/35 p-5">
+                  <div><h4 className="flex items-center gap-2 font-semibold text-white"><KeyRound className="text-cyan-400" size={19} />Change password</h4><p className="mt-1 text-sm text-gray-500">Changing it revokes every refresh session and requires signing in again.</p></div>
+                  <label className="block text-sm text-gray-400">Current password<input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label>
+                  <label className="block text-sm text-gray-400">New password<input type="password" autoComplete="new-password" required minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label>
+                  <div className="grid gap-2 text-xs sm:grid-cols-2">{passwordRules.map((rule) => <div key={rule.label} className={`flex items-center gap-2 ${rule.met ? 'text-emerald-300' : 'text-gray-600'}`}><CircleCheck size={14} /> {rule.label}</div>)}</div>
+                  <label className="block text-sm text-gray-400">Confirm new password<input type="password" autoComplete="new-password" required minLength={12} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label>
+                  <div className="flex justify-end border-t border-gray-800 pt-5"><button disabled={saving || passwordRules.some((rule) => !rule.met) || newPassword !== confirmPassword} className="flex items-center gap-2 rounded-xl bg-cyan-500 px-5 py-2.5 font-semibold text-gray-950 disabled:opacity-50">{saving ? <Loader2 size={17} className="animate-spin" /> : <KeyRound size={17} />} Change password</button></div>
+                </form>
+
+                <div className="rounded-2xl border border-gray-800 bg-gray-950/35 p-5">
+                  <div className="mb-4 flex items-center justify-between gap-3"><div><h4 className="flex items-center gap-2 font-semibold text-white"><Activity size={18} className="text-cyan-400" />Recent security activity</h4><p className="mt-1 text-sm text-gray-500">The latest sign-in, password and session events for your account.</p></div><button type="button" onClick={() => void loadSecurityEvents()} disabled={eventsLoading} className="rounded-lg p-2 text-gray-500 hover:bg-gray-800 hover:text-cyan-300" aria-label="Refresh security activity"><RefreshCw size={17} className={eventsLoading ? 'animate-spin' : ''} /></button></div>
+                  {eventsLoading ? <div className="flex justify-center py-8 text-gray-500"><Loader2 className="animate-spin" /></div> : securityEvents.length === 0 ? <p className="py-6 text-center text-sm text-gray-600">No security events recorded yet.</p> : <div className="divide-y divide-gray-800">{securityEvents.slice(0, 8).map((event) => <div key={event.id} className="flex items-start gap-3 py-3"><div className={`mt-0.5 rounded-lg p-2 ${event.action.includes('FAILED') || event.action.includes('REPLAYED') ? 'bg-red-500/10 text-red-300' : 'bg-emerald-500/10 text-emerald-300'}`}>{event.action.includes('FAILED') || event.action.includes('REPLAYED') ? <ShieldAlert size={16} /> : <ShieldCheck size={16} />}</div><div className="min-w-0 flex-1"><p className="text-sm text-gray-200">{securityActionLabel(event.action)}</p><p className="mt-1 truncate text-xs text-gray-600">{describeAgent(event.user_agent)} · IP {event.ip_address || 'unknown'}</p></div><time className="shrink-0 text-xs text-gray-600">{new Date(event.created_at).toLocaleString()}</time></div>)}</div>}
+                </div>
+              </div>
             )}
 
             {section === 'sessions' && (
               <div className="mx-auto max-w-2xl space-y-5">
-                <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-xl font-semibold text-white">Active sessions</h3><p className="mt-1 text-sm text-gray-500">Refresh sessions that can issue new access tokens.</p></div><button type="button" onClick={revokeAllSessions} disabled={revokingId === 'all' || sessions.length === 0} className="flex items-center gap-2 rounded-xl border border-red-500/30 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:opacity-40">{revokingId === 'all' ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out all</button></div>
-                {sessionsLoading ? <div className="flex justify-center py-14 text-gray-500"><Loader2 className="animate-spin" /></div> : sessions.length === 0 ? <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-8 text-center text-sm text-gray-500">No active refresh sessions.</div> : <div className="space-y-3">{sessions.map((session) => <div key={session.id} className="flex items-center gap-4 rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="rounded-xl bg-gray-800 p-2.5 text-cyan-400"><MonitorSmartphone size={20} /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-gray-200">{describeAgent(session.user_agent)}</p><p className="mt-1 text-xs text-gray-500">IP {session.ip_address || 'unknown'} · Created {new Date(session.created_at).toLocaleString()} · Expires {new Date(session.expires_at).toLocaleString()}</p></div><button type="button" onClick={() => revokeSession(session.id)} disabled={revokingId === session.id} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300" aria-label="Revoke session">{revokingId === session.id ? <Loader2 size={17} className="animate-spin" /> : <Trash2 size={17} />}</button></div>)}</div>}
+                <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-xl font-semibold text-white">Active sessions</h3><p className="mt-1 text-sm text-gray-500">Devices that can renew access to your account.</p></div><div className="flex gap-2"><button type="button" onClick={() => void loadSessions()} disabled={sessionsLoading} className="rounded-xl border border-gray-700 p-2 text-gray-400 hover:border-cyan-500/40 hover:text-cyan-300" aria-label="Refresh sessions"><RefreshCw size={17} className={sessionsLoading ? 'animate-spin' : ''} /></button><button type="button" onClick={revokeAllSessions} disabled={revokingId === 'all' || sessions.length === 0} className="flex items-center gap-2 rounded-xl border border-red-500/30 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:opacity-40">{revokingId === 'all' ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out all</button></div></div>
+                {sessionsLoading ? <div className="flex justify-center py-14 text-gray-500"><Loader2 className="animate-spin" /></div> : sessions.length === 0 ? <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-8 text-center text-sm text-gray-500">No active refresh sessions.</div> : <div className="space-y-3">{sessions.map((session) => <div key={session.id} className={`flex items-center gap-4 rounded-xl border p-4 ${session.is_current ? 'border-cyan-500/30 bg-cyan-950/15' : 'border-gray-800 bg-gray-950/50'}`}><div className="rounded-xl bg-gray-800 p-2.5 text-cyan-400"><MonitorSmartphone size={20} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="truncate text-sm font-medium text-gray-200">{describeAgent(session.user_agent)}</p>{session.is_current && <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">This device</span>}</div><p className="mt-1 text-xs text-gray-500">IP {session.ip_address || 'unknown'} · Last active {new Date(session.last_active_at).toLocaleString()}</p><p className="mt-1 text-xs text-gray-600">Signed in {new Date(session.session_started_at).toLocaleString()} · Expires {new Date(session.expires_at).toLocaleString()}</p></div><button type="button" onClick={() => void revokeSession(session)} disabled={revokingId === session.id} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300" aria-label={session.is_current ? 'Sign out this device' : 'Revoke session'}>{revokingId === session.id ? <Loader2 size={17} className="animate-spin" /> : session.is_current ? <LogOut size={17} /> : <Trash2 size={17} />}</button></div>)}</div>}
                 <p className="text-xs leading-5 text-gray-600">Revoking a refresh session prevents renewal. An access token already issued from it can remain valid until its short expiry window ends.</p>
               </div>
             )}

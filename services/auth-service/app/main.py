@@ -12,6 +12,7 @@ Endpoints match the frontend api.ts contract:
 """
 
 import hashlib
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -32,7 +33,7 @@ from app.models import (
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest, ChangePasswordRequest,
     UpdateProfileRequest, AuthResponse, MeResponse,
-    MessageResponse, SessionResponse, UserResponse, TokenPair,
+    MessageResponse, SecurityEventResponse, SessionResponse, UserResponse, TokenPair,
     AdminStatsResponse, ProjectCreateRequest, ProjectDeleteRequest, ProjectUpdateRequest,
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
     ProjectMemberCandidateResponse, ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
@@ -149,15 +150,23 @@ def _request_context(request: Request) -> tuple[str | None, str | None]:
     return client_ip, user_agent
 
 
-def _new_refresh_session(user_id: str, request: Request) -> tuple[str, RefreshToken]:
+def _new_refresh_session(
+    user_id: str,
+    request: Request,
+    session_started_at: datetime | None = None,
+) -> tuple[str, RefreshToken]:
     raw_refresh, refresh_hash, expires_at = create_refresh_token()
     client_ip, user_agent = _request_context(request)
+    now = datetime.now(timezone.utc)
     return raw_refresh, RefreshToken(
+        id=str(uuid.uuid4()),
         user_id=user_id,
         token_hash=refresh_hash,
         expires_at=expires_at,
         ip_address=client_ip,
         user_agent=user_agent,
+        session_started_at=session_started_at or now,
+        last_used_at=now,
     )
 
 
@@ -252,8 +261,8 @@ async def register(req: RegisterRequest, request: Request, db: AsyncSession = De
     await db.refresh(user)
 
     # Generate tokens
-    access = create_access_token(user.id, user.email)
     raw_refresh, rt = _new_refresh_session(user.id, request)
+    access = create_access_token(user.id, user.email, rt.id)
     db.add(rt)
     _add_security_audit(db, "USER_REGISTERED", request, user_id=user.id)
     await db.commit()
@@ -291,8 +300,8 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     user.last_login_at = datetime.now(timezone.utc)
     await db.flush()
 
-    access = create_access_token(user.id, user.email)
     raw_refresh, rt = _new_refresh_session(user.id, request)
+    access = create_access_token(user.id, user.email, rt.id)
     db.add(rt)
     _add_security_audit(db, "USER_LOGGED_IN", request, user_id=user.id)
     await db.commit()
@@ -387,8 +396,12 @@ async def refresh(req: RefreshRequest, request: Request, db: AsyncSession = Depe
     rt.revoked_at = datetime.now(timezone.utc)
 
     # Issue new tokens
-    access = create_access_token(user.id, user.email)
-    raw_refresh, new_rt = _new_refresh_session(user.id, request)
+    raw_refresh, new_rt = _new_refresh_session(
+        user.id,
+        request,
+        rt.session_started_at or rt.created_at,
+    )
+    access = create_access_token(user.id, user.email, new_rt.id)
     db.add(new_rt)
     await db.commit()
 
@@ -460,9 +473,16 @@ async def change_password(
 
 @app.get("/api/v1/auth/sessions", response_model=List[SessionResponse])
 async def list_sessions(
+    authorization: str = Header(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    current_session_id = None
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            current_session_id = decode_access_token(authorization.split(" ", 1)[1]).get("sid")
+        except Exception:
+            pass
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     result = await db.execute(
         select(RefreshToken)
@@ -479,9 +499,45 @@ async def list_sessions(
             ip_address=session.ip_address,
             user_agent=session.user_agent,
             created_at=session.created_at,
+            session_started_at=session.session_started_at,
+            last_active_at=session.last_used_at,
             expires_at=session.expires_at,
+            is_current=session.id == current_session_id,
         )
         for session in result.scalars().all()
+    ]
+
+
+@app.get("/api/v1/auth/security-events", response_model=List[SecurityEventResponse])
+async def list_security_events(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    security_actions = (
+        "USER_REGISTERED",
+        "USER_LOGGED_IN",
+        "USER_LOGIN_FAILED",
+        "USER_LOGGED_OUT",
+        "PASSWORD_CHANGED",
+        "SESSION_REVOKED",
+        "SESSIONS_REVOKED",
+        "REFRESH_TOKEN_REPLAYED",
+    )
+    result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.user_id == user.id, AuditLog.action.in_(security_actions))
+        .order_by(AuditLog.created_at.desc())
+        .limit(20)
+    )
+    return [
+        SecurityEventResponse(
+            id=event.id,
+            action=event.action,
+            ip_address=event.ip_address,
+            user_agent=event.user_agent,
+            created_at=event.created_at,
+        )
+        for event in result.scalars().all()
     ]
 
 
@@ -489,6 +545,7 @@ async def list_sessions(
 async def revoke_session(
     session_id: str,
     request: Request,
+    authorization: str = Header(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -511,6 +568,13 @@ async def revoke_session(
             details={"session_id": session.id},
         )
         await db.commit()
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            payload = decode_access_token(authorization.split(" ", 1)[1])
+            if payload.get("sid") == session.id:
+                await _blacklist_authorization_token(authorization)
+        except Exception:
+            pass
     return MessageResponse(detail="Session revoked")
 
 
