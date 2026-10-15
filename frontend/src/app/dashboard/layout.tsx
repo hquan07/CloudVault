@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, FolderKanban } from 'lucide-react';
+import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, FolderKanban, X } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
 
@@ -13,7 +13,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const [showSettings, setShowSettings] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
+  const mobileCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -24,6 +26,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     setAvatarFailed(false);
   }, [user?.avatar_url]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    mobileCloseRef.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [mobileNavOpen]);
 
   if (loading || !user) {
     return (
@@ -53,84 +74,141 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const usagePercent = Math.min(100, (user.storage_used / user.storage_quota) * 100);
+  const renderSidebarContent = (mobile = false) => (
+    <>
+      <div className="flex h-16 items-center justify-between border-b border-gray-800 px-6">
+        <div className="flex items-center space-x-2 text-cyan-400">
+          <Cloud size={28} />
+          <span className="text-xl font-bold tracking-tight text-white">CloudVault</span>
+        </div>
+        {mobile && (
+          <button
+            ref={mobileCloseRef}
+            type="button"
+            onClick={() => setMobileNavOpen(false)}
+            className="rounded-lg p-2 text-gray-400 hover:bg-gray-800 hover:text-white"
+            aria-label="Close navigation"
+          >
+            <X size={20} />
+          </button>
+        )}
+      </div>
+
+      <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-6" aria-label="Dashboard navigation">
+        {navItems.map((item) => {
+          const isActive = pathname === item.path || (
+            item.path !== '/dashboard' && pathname.startsWith(`${item.path}/`)
+          );
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.name}
+              href={item.path}
+              aria-current={isActive ? 'page' : undefined}
+              className={`flex items-center space-x-3 rounded-xl px-4 py-3 transition-all duration-200 ${
+                isActive
+                  ? 'bg-cyan-500/10 font-medium text-cyan-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+              }`}
+            >
+              <Icon size={20} className={isActive ? 'text-cyan-400' : 'text-gray-500'} />
+              <span>{item.name}</span>
+            </Link>
+          );
+        })}
+      </nav>
+
+      <div className="border-t border-gray-800 p-6">
+        <div className="mb-4">
+          <div className="mb-1.5 flex justify-between text-xs text-gray-400">
+            <span>Storage</span>
+            <span>{Math.round(usagePercent)}%</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-gray-800">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${usagePercent > 90 ? 'bg-red-500' : 'bg-cyan-500'}`}
+              style={{ width: `${usagePercent}%` }}
+            />
+          </div>
+          <div className="mt-2 text-[11px] font-medium text-gray-500">
+            {formatBytes(user.storage_used)} of {formatBytes(user.storage_quota)} used
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-gray-800/50 p-3">
+          <div className="flex items-center space-x-3 overflow-hidden">
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-tr from-cyan-500 to-blue-500 text-sm font-bold uppercase text-white">
+              {user.avatar_url && !avatarFailed ? (
+                // User-provided remote URLs cannot use the optimized image allowlist.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={user.avatar_url} alt="" className="h-full w-full rounded-full object-cover" onError={() => setAvatarFailed(true)} />
+              ) : user.username.charAt(0)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium">{user.username}</div>
+              <div className="truncate text-xs text-gray-400">{user.email}</div>
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => { setMobileNavOpen(false); setShowSettings(true); }}
+              className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <Settings size={15} /> Settings
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-gray-300 hover:bg-red-400/10 hover:text-red-300"
+            >
+              <LogOut size={15} /> Log out
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
 
   return (
     <div className="cloudvault-dashboard flex h-screen bg-gray-950 text-gray-100 overflow-hidden font-sans">
       {/* Sidebar */}
       <aside className="cloudvault-sidebar w-64 bg-gray-900 border-r border-gray-800 flex flex-col hidden md:flex z-20 shadow-xl">
-        <div className="h-16 flex items-center px-6 border-b border-gray-800">
-          <div className="flex items-center space-x-2 text-cyan-400">
-            <Cloud size={28} />
-            <span className="text-xl font-bold tracking-tight text-white">CloudVault</span>
-          </div>
-        </div>
-        
-        <nav className="flex-1 overflow-y-auto py-6 px-4 space-y-1.5">
-          {navItems.map((item) => {
-            const isActive = pathname === item.path || (
-              item.path !== '/dashboard' && pathname.startsWith(`${item.path}/`)
-            );
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.name}
-                href={item.path}
-                className={`flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                  isActive 
-                    ? 'bg-cyan-500/10 text-cyan-400 font-medium' 
-                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                }`}
-              >
-                <Icon size={20} className={isActive ? 'text-cyan-400' : 'text-gray-500'} />
-                <span>{item.name}</span>
-              </Link>
-            );
-          })}
-        </nav>
-
-        <div className="p-6 border-t border-gray-800">
-          <div className="mb-4">
-            <div className="flex justify-between text-xs mb-1.5 text-gray-400">
-              <span>Storage</span>
-              <span>{Math.round(usagePercent)}%</span>
-            </div>
-            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-              <div 
-                className={`h-full rounded-full transition-all duration-500 ${usagePercent > 90 ? 'bg-red-500' : 'bg-cyan-500'}`} 
-                style={{ width: `${usagePercent}%` }}
-              ></div>
-            </div>
-            <div className="text-[11px] text-gray-500 mt-2 font-medium">
-              {formatBytes(user.storage_used)} of {formatBytes(user.storage_quota)} used
-            </div>
-          </div>
-          
-          <div className="flex items-center justify-between p-3 bg-gray-800/50 rounded-xl">
-            <div className="flex items-center space-x-3 overflow-hidden">
-              <div className="w-9 h-9 bg-gradient-to-tr from-cyan-500 to-blue-500 rounded-full flex items-center justify-center text-sm font-bold text-white uppercase flex-shrink-0">
-                {user.avatar_url && !avatarFailed ? (
-                  // User-provided remote URLs cannot use the optimized image allowlist.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={user.avatar_url} alt="" className="h-full w-full rounded-full object-cover" onError={() => setAvatarFailed(true)} />
-                ) : user.username.charAt(0)}
-              </div>
-              <div className="truncate">
-                <div className="text-sm font-medium truncate">{user.username}</div>
-                <div className="text-xs text-gray-400 truncate">{user.email}</div>
-              </div>
-            </div>
-            <button onClick={logout} className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors" title="Log out">
-              <LogOut size={16} />
-            </button>
-          </div>
-        </div>
+        {renderSidebarContent()}
       </aside>
+
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => setMobileNavOpen(false)}
+            aria-label="Close navigation"
+          />
+          <aside
+            id="mobile-dashboard-navigation"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Dashboard navigation"
+            className="cloudvault-sidebar relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-gray-800 bg-gray-900 shadow-2xl"
+          >
+            {renderSidebarContent(true)}
+          </aside>
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="h-16 bg-gray-900/50 backdrop-blur-md border-b border-gray-800 flex items-center px-6 z-10 relative">
           <div className="flex items-center w-1/3">
-            <button className="md:hidden p-2 text-gray-400 hover:bg-gray-800 rounded-lg">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="rounded-lg p-2 text-gray-400 hover:bg-gray-800 md:hidden"
+              aria-label="Open navigation"
+              aria-controls="mobile-dashboard-navigation"
+              aria-expanded={mobileNavOpen}
+            >
               <Menu size={20} />
             </button>
           </div>
