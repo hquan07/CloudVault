@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688.svg)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-16.2.6-black.svg)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16.4.1-black.svg)](https://nextjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -23,7 +23,10 @@ and an operations plane for quota and object-integrity monitoring.
 
 - Streamed S3-compatible uploads to MinIO with file-version retention.
 - Personal folders, starred files, trash, sharing links and storage quota.
-- JWT access/refresh tokens, refresh rotation and Redis-backed revocation.
+- JWT access/refresh tokens, atomic refresh rotation, replay detection and
+  Redis-backed revocation.
+- Account security settings for password changes and per-device refresh-session
+  review/revocation.
 - Full-text search through authenticated Elasticsearch.
 - In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
 - Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events
@@ -126,7 +129,7 @@ project authorization, storage semantics and operational recovery.
 
 | Domain | Technology | Purpose |
 |---|---|---|
-| Frontend | Next.js 16.2.6, React 19, TypeScript | UI, previews and interactive topology |
+| Frontend | Next.js 16.4.1, React 19, TypeScript | UI, previews and interactive topology |
 | Backend | Python 3.11, FastAPI 0.115.6, SQLAlchemy | Async API microservices |
 | Database | MySQL 8.0, asyncmy | Users, projects, metadata, versions and audit |
 | Cache and Pub/Sub | Redis 7 | JWT revocation and WebSocket notifications |
@@ -234,12 +237,22 @@ bind to loopback; persistence and messaging services stay Docker-internal.
   different random value for every password and `JWT_SECRET_KEY`.
 - Browser users authenticate with JWTs. Project applications use independently
   revocable, scope-limited service tokens; CloudVault stores token hashes only.
+- Login, registration, refresh and public-share access have gateway limits;
+  authentication also applies an identity-aware Redis limit and records
+  security audit events.
+- Refresh tokens rotate atomically. Replaying a revoked refresh token revokes
+  the user's remaining refresh sessions, and password changes sign out every
+  refresh session.
 - MySQL, Redis, Elasticsearch, Kafka and ZooKeeper are only reachable through
   `cloudvault-network`.
 - `cloudvault-shared` exposes only the Nginx gateway to connected project
   uploader services. It does not expose MySQL, Redis or MinIO.
 - Elasticsearch uses separate bootstrap, Kibana and least-privilege application
   accounts. Redis, Grafana and MinIO require configured credentials.
+- Nginx adds baseline browser security headers and a request ID. FastAPI CORS
+  uses the `CORS_ALLOWED_ORIGINS` allowlist instead of a wildcard.
+- Application containers run without Linux capabilities, cannot gain new
+  privileges, use non-root users, and mount development source read-only.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a
   firewall/private network protects access. Terminate TLS at Nginx or an
   upstream trusted proxy in production.

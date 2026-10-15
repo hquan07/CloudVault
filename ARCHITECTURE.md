@@ -166,13 +166,26 @@ folder, usage and operation-status requests go to File Service.
 
 1. Auth Service verifies credentials against MySQL.
 2. It issues a short-lived access JWT and a refresh token whose hash is stored in
-   MySQL.
-3. Refresh tokens rotate when used. Logout revokes the refresh token and stores
-   the access-token `jti` in Redis for its remaining lifetime.
-4. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
+   MySQL together with the client IP and user agent.
+3. Refresh tokens rotate atomically under a row lock. Reuse of an already
+   revoked refresh token is treated as replay and revokes all remaining refresh
+   sessions for that user.
+4. Logout revokes the current refresh token and stores the access-token `jti` in
+   Redis for its remaining lifetime. Password changes revoke every refresh
+   session and blacklist the current access token.
+5. Users can inspect active refresh sessions and revoke one or all of them from
+   Account Settings.
+6. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
    and inactive users.
-5. Project access additionally requires system-admin status or project
+7. Project access additionally requires system-admin status or project
    membership with the required `viewer`, `editor` or `admin` role.
+
+Registration requires passwords of at least 12 characters. Authentication
+abuse protection is layered: Nginx limits requests per source address, while
+Auth Service applies configurable Redis-backed limits per client/identity pair.
+The application limiter fails open if Redis is unavailable so the gateway
+remains the outer protection. Login, logout, refresh replay, password and
+session-revocation actions are written to the security audit trail.
 
 ### Project applications
 
@@ -337,8 +350,9 @@ The MySQL image runs the baseline schema for a new volume. The one-shot
 `mysql-migrate` service waits for MySQL health and applies ordered, idempotent
 migrations before API services start. Project migrations add project ownership,
 service accounts, audit context, folders, per-user stars/pins, project operation
-status and event-delivery deduplication without changing existing personal
-ownership. Migrations `002` through `010` are applied in order.
+status, event-delivery deduplication and refresh-session security metadata
+without changing existing personal ownership. Migrations `002` through `011`
+are applied in order.
 
 Database and object storage must be backed up together. Restoring only MySQL or
 only MinIO can leave valid metadata without objects, or objects without a
@@ -362,6 +376,10 @@ flowchart LR
 
 - Nginx is publicly bound by default; direct application and administration
   ports bind to loopback.
+- Nginx applies endpoint-specific limits to login, registration, token refresh
+  and public-share access, returns JSON `429` responses, propagates a request ID
+  and adds baseline CSP, framing, MIME-sniffing, referrer and permissions
+  headers. TLS deployments should add HSTS only after HTTPS is enforced.
 - Persistence, cache, search and messaging services do not publish host ports,
   except MinIO's loopback-only administration endpoints.
 - `cloudvault-shared` contains Nginx and explicitly selected uploader services,
@@ -370,6 +388,11 @@ flowchart LR
   and least-privilege application users.
 - Redis, MinIO and Grafana require configured credentials. Compose rejects
   missing required secrets.
+- Direct-development CORS is an explicit `CORS_ALLOWED_ORIGINS` list; normal UI
+  traffic stays same-origin through Nginx.
+- Frontend, API and worker containers run as non-root users with all Linux
+  capabilities dropped and `no-new-privileges` enabled. API and periodic-worker
+  source mounts are read-only; production code changes require an image rebuild.
 - TLS should terminate at Nginx or a trusted upstream proxy in production.
 
 ## 10. Health and Observability Semantics
