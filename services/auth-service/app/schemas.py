@@ -44,8 +44,11 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str] = None
     role: str
     is_active: bool
+    is_verified: bool
+    oauth_provider: str
     storage_quota: int
     storage_used: int
+    last_login_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:

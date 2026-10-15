@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  BadgeCheck,
+  CalendarDays,
   Check,
+  HardDrive,
   KeyRound,
   Loader2,
   LogOut,
+  Mail,
   MonitorSmartphone,
   Save,
   ShieldCheck,
@@ -39,6 +43,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const { user, refreshUser, logout } = useAuth();
   const [section, setSection] = useState<SettingsSection>('profile');
   const [username, setUsername] = useState(user?.username || '');
+  const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url || '');
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState('');
   const [error, setError] = useState('');
@@ -83,12 +89,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
   const saveProfile = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!username.trim() || username.trim() === user.username) return;
+    const normalizedAvatar = avatarUrl.trim();
+    if (!username.trim() || (username.trim() === user.username && normalizedAvatar === (user.avatar_url || ''))) return;
     setSaving(true);
     resetMessages();
     try {
-      await authApi.updateProfile({ username: username.trim() });
+      await authApi.updateProfile({ username: username.trim(), avatar_url: normalizedAvatar });
       await refreshUser();
+      setAvatarFailed(false);
       setSuccess('Profile updated.');
     } catch (saveError: unknown) {
       setError(errorMessage(saveError, 'Failed to update profile'));
@@ -157,6 +165,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     { id: 'sessions', label: 'Sessions', icon: MonitorSmartphone },
   ];
 
+  const storagePercent = user.storage_quota
+    ? Math.min(100, (user.storage_used / user.storage_quota) * 100)
+    : 0;
+  const profileUnchanged = username.trim() === user.username
+    && avatarUrl.trim() === (user.avatar_url || '');
+  const initials = user.username.slice(0, 2).toUpperCase();
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
@@ -165,6 +180,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           <div className="mb-6">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-400">Account</p>
             <h2 className="mt-1 text-xl font-bold text-white">Settings</h2>
+          </div>
+          <div className="mb-5 flex items-center gap-3 rounded-xl border border-gray-800 bg-gray-900/70 p-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-cyan-500/15 text-sm font-semibold text-cyan-300">
+              {user.avatar_url && !avatarFailed ? (
+                // User-provided remote URLs cannot use the optimized image allowlist.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={user.avatar_url} alt="" className="h-full w-full object-cover" onError={() => setAvatarFailed(true)} />
+              ) : initials}
+            </div>
+            <div className="min-w-0"><p className="truncate text-sm font-medium text-white">{user.username}</p><p className="truncate text-xs text-gray-500">{user.email}</p></div>
           </div>
           <nav className="space-y-1">
             {sections.map((item) => {
@@ -193,12 +218,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             {success && <div className="mb-5 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300"><Check size={16} />{success}</div>}
 
             {section === 'profile' && (
-              <form onSubmit={saveProfile} className="mx-auto max-w-xl space-y-6">
-                <div><h3 className="text-xl font-semibold text-white">Profile</h3><p className="mt-1 text-sm text-gray-500">Personal settings are separate from project roles and policies.</p></div>
-                <label className="block text-sm text-gray-400">Email address<input value={user.email} disabled className="mt-2 w-full cursor-not-allowed rounded-xl border border-gray-800 bg-gray-800/40 px-4 py-3 text-gray-500" /></label>
-                <label className="block text-sm text-gray-400">Display name<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={100} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /></label>
-                <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-4"><div className="mb-2 flex justify-between text-xs text-gray-400"><span>{formatBytes(user.storage_used)} used</span><span>{formatBytes(user.storage_quota)} total</span></div><div className="h-2 overflow-hidden rounded-full bg-gray-800"><div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500" style={{ width: `${Math.min(100, user.storage_quota ? (user.storage_used / user.storage_quota) * 100 : 0)}%` }} /></div></div>
-                <div className="flex justify-end border-t border-gray-800 pt-5"><button disabled={saving || username.trim() === user.username} className="flex items-center gap-2 rounded-xl bg-cyan-500 px-5 py-2.5 font-semibold text-gray-950 disabled:cursor-not-allowed disabled:opacity-50">{saving ? <Loader2 size={17} className="animate-spin" /> : <Save size={17} />} Save profile</button></div>
+              <form onSubmit={saveProfile} className="mx-auto max-w-2xl space-y-6">
+                <div><h3 className="text-xl font-semibold text-white">Profile & account</h3><p className="mt-1 text-sm text-gray-500">Personal identity and storage are separate from project roles and quotas.</p></div>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><ShieldCheck size={15} /> Role</div><p className="mt-2 capitalize text-sm font-medium text-gray-200">{user.role}</p></div>
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><BadgeCheck size={15} /> Status</div><p className="mt-2 text-sm font-medium text-emerald-300">{user.is_active ? 'Active' : 'Disabled'}{user.is_verified ? ' · verified' : ''}</p></div>
+                  <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><CalendarDays size={15} /> Member since</div><p className="mt-2 text-sm font-medium text-gray-200">{new Date(user.created_at).toLocaleDateString()}</p></div>
+                </div>
+
+                <div className="grid gap-5 sm:grid-cols-[96px_1fr] sm:items-start">
+                  <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-2xl border border-gray-700 bg-cyan-500/10 text-2xl font-semibold text-cyan-300">
+                    {avatarUrl && !avatarFailed ? (
+                      // User-provided remote URLs cannot use the optimized image allowlist.
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={avatarUrl} alt="Profile avatar preview" className="h-full w-full object-cover" onError={() => setAvatarFailed(true)} />
+                    ) : initials}
+                  </div>
+                  <div className="space-y-4">
+                    <label className="block text-sm text-gray-400">Username<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={100} required className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /></label>
+                    <label className="block text-sm text-gray-400">Avatar URL<input type="url" value={avatarUrl} onChange={(event) => { setAvatarUrl(event.target.value); setAvatarFailed(false); }} maxLength={500} placeholder="https://example.com/avatar.jpg" className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none placeholder:text-gray-700 focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /><span className="mt-1 block text-xs text-gray-600">Leave empty to use your initials.</span></label>
+                  </div>
+                </div>
+
+                <label className="block text-sm text-gray-400">Email address<div className="mt-2 flex items-center gap-3 rounded-xl border border-gray-800 bg-gray-800/40 px-4 py-3 text-gray-500"><Mail size={17} /><span>{user.email}</span><span className="ml-auto text-xs">Managed by your sign-in identity</span></div></label>
+
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+                  <div className="flex items-start justify-between gap-4"><div><div className="flex items-center gap-2 text-sm font-medium text-gray-200"><HardDrive size={17} className="text-cyan-400" /> Personal storage</div><p className="mt-1 text-xs text-gray-500">Project storage is counted against each project quota separately.</p></div><span className="text-sm font-semibold text-cyan-300">{storagePercent.toFixed(1)}%</span></div>
+                  <div className="my-3 h-2 overflow-hidden rounded-full bg-gray-800"><div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500" style={{ width: `${storagePercent}%` }} /></div>
+                  <div className="flex justify-between text-xs text-gray-400"><span>{formatBytes(user.storage_used)} used</span><span>{formatBytes(Math.max(0, user.storage_quota - user.storage_used))} available · {formatBytes(user.storage_quota)} total</span></div>
+                </div>
+                <div className="flex justify-end border-t border-gray-800 pt-5"><button disabled={saving || profileUnchanged} className="flex items-center gap-2 rounded-xl bg-cyan-500 px-5 py-2.5 font-semibold text-gray-950 disabled:cursor-not-allowed disabled:opacity-50">{saving ? <Loader2 size={17} className="animate-spin" /> : <Save size={17} />} Save profile</button></div>
               </form>
             )}
 

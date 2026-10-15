@@ -13,8 +13,12 @@ interface User {
   username: string;
   avatar_url: string | null;
   role: 'user' | 'admin';
+  is_active: boolean;
+  is_verified: boolean;
+  oauth_provider: 'local' | 'google' | 'github';
   storage_quota: number;
   storage_used: number;
+  last_login_at: string | null;
   created_at: string;
 }
 

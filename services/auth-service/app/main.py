@@ -133,8 +133,11 @@ def _user_response(user: User) -> UserResponse:
         avatar_url=user.avatar_url,
         role=user.role,
         is_active=user.is_active,
+        is_verified=user.is_verified,
+        oauth_provider=user.oauth_provider,
         storage_quota=user.storage_quota,
         storage_used=user.storage_used,
+        last_login_at=user.last_login_at,
         created_at=user.created_at,
     )
 
