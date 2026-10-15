@@ -512,6 +512,28 @@ services:
     networks:
       - cloudvault-network
 
+  account-deletion-worker:
+    <<: *runtime-hardening
+    build: ./workers/account-deletion
+    container_name: cloudvault-account-deletion
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./workers/account-deletion:/app:ro
+    depends_on:
+      mysql-migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9101/metrics', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - cloudvault-network
+
   zip-extractor-worker:
     <<: *runtime-hardening
     build:

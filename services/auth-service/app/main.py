@@ -1095,7 +1095,7 @@ async def cancel_account_deletion(
     user = result.scalar_one_or_none()
     if not user or not user.password_hash or not verify_password(req.current_password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    if user.deletion_status not in {"pending", "failed"}:
+    if user.deletion_status != "pending":
         raise HTTPException(status_code=409, detail="Account deletion cannot be cancelled")
     if user.mfa_enabled:
         if not req.mfa_code:
@@ -1112,7 +1112,7 @@ async def cancel_account_deletion(
         .with_for_update()
     )
     deletion_request = deletion_result.scalar_one_or_none()
-    if not deletion_request or deletion_request.status not in {"scheduled", "failed"}:
+    if not deletion_request or deletion_request.status != "scheduled":
         raise HTTPException(status_code=409, detail="Account deletion can no longer be cancelled")
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
