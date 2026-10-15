@@ -414,10 +414,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       <img src={avatarUrl} alt="Profile avatar preview" className="h-full w-full object-cover" onError={() => setAvatarFailed(true)} />
                     ) : initials}
                   </div>
-                  <div className="space-y-4">
-                    <label className="block text-sm text-gray-400">Username<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={100} required className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /></label>
-                    <label className="block text-sm text-gray-400">Avatar URL<input type="url" value={avatarUrl} onChange={(event) => { setAvatarUrl(event.target.value); setAvatarFailed(false); }} maxLength={500} placeholder="https://example.com/avatar.jpg" className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none placeholder:text-gray-700 focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /><span className="mt-1 block text-xs text-gray-600">Leave empty to use your initials.</span></label>
-                  </div>
+                  <label className="block text-sm text-gray-400">Username<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={100} required className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /></label>
+                  <label className="block text-sm text-gray-400 sm:col-span-2">Avatar URL<input type="url" value={avatarUrl} onChange={(event) => { setAvatarUrl(event.target.value); setAvatarFailed(false); }} maxLength={500} placeholder="https://example.com/avatar.jpg" className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none placeholder:text-gray-700 focus:border-cyan-500/60 focus:ring-2 focus:ring-cyan-500/20" /><span className="mt-1 block text-xs text-gray-600">Leave empty to use your initials.</span></label>
                 </div>
 
                 <label className="block text-sm text-gray-400">Email address<div className="mt-2 flex items-center gap-3 rounded-xl border border-gray-800 bg-gray-800/40 px-4 py-3 text-gray-500"><Mail size={17} /><span>{user.email}</span><span className="ml-auto text-xs">Managed by your sign-in identity</span></div></label>
