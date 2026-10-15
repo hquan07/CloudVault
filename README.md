@@ -251,6 +251,8 @@ bind to loopback; persistence and messaging services stay Docker-internal.
   accounts. Redis, Grafana and MinIO require configured credentials.
 - Nginx adds baseline browser security headers and a request ID. FastAPI CORS
   uses the `CORS_ALLOWED_ORIGINS` allowlist instead of a wildcard.
+- Notification WebSockets authenticate in their first frame so access tokens do
+  not appear in request URLs or access logs.
 - Application containers run without Linux capabilities, cannot gain new
   privileges, use non-root users, and mount development source read-only.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a

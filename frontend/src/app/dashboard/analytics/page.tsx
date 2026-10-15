@@ -48,8 +48,12 @@ export default function AnalyticsDashboard() {
     
     // Connect to WebSocket
     const token = typeof window !== 'undefined' ? localStorage.getItem('cloudvault_access_token') : null;
-    const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || `ws://${window.location.host}/api/v1/analytics/ws`) + (token ? `?token=${token}` : '');
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://${window.location.host}/api/v1/analytics/ws`;
     const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      if (token) ws.send(JSON.stringify({ type: 'authenticate', token }));
+    };
     
     ws.onmessage = (event) => {
       try {

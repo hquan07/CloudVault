@@ -306,18 +306,22 @@ import json
 # ── WebSocket Notifications ──
 
 @app.websocket("/api/v1/metadata/ws/notifications")
-async def websocket_notifications(websocket: WebSocket, token: str = Query(None)):
-    if not token:
-        await websocket.close(code=1008)
-        return
+async def websocket_notifications(websocket: WebSocket):
+    # Browser WebSocket APIs cannot attach an Authorization header. Authenticate
+    # with the first frame instead of a query parameter so access tokens never
+    # appear in gateway/Uvicorn request logs, browser history, or copied URLs.
+    await websocket.accept()
     try:
+        auth_message = await asyncio.wait_for(websocket.receive_text(), timeout=5)
+        auth_payload = json.loads(auth_message)
+        token = auth_payload.get("token") if auth_payload.get("type") == "authenticate" else None
+        if not isinstance(token, str) or not token:
+            raise ValueError("missing websocket authentication token")
         async with async_session() as session:
             user = await authenticate_token(token, session)
-    except Exception:
+    except (asyncio.TimeoutError, json.JSONDecodeError, ValueError, HTTPException):
         await websocket.close(code=1008)
         return
-        
-    await websocket.accept()
     
     pubsub = redis_client.pubsub()
     channel = f"notifications:{user.id}"

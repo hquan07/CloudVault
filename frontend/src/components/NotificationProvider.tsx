@@ -7,7 +7,9 @@ import { Bell, X } from 'lucide-react';
 interface NotificationData {
     id: string;
     type: string;
-    message: string;
+    message?: string;
+    action?: string;
+    resource_name?: string;
 }
 
 export function NotificationProvider({ children }: { children: ReactNode }) {
@@ -20,9 +22,13 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         if (!token) return;
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/v1/metadata/ws/notifications?token=${token}`;
+        const wsUrl = `${protocol}//${window.location.host}/api/v1/metadata/ws/notifications`;
         
         const ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ type: 'authenticate', token }));
+        };
 
         ws.onmessage = (event) => {
             try {
@@ -59,7 +65,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
                         <div className="bg-indigo-500/50 p-2 rounded-full">
                             <Bell className="w-5 h-5 text-white" />
                         </div>
-                        <span className="text-sm font-medium mr-4">{n.message}</span>
+                        <span className="text-sm font-medium mr-4">
+                            {n.message || `${n.action || 'Activity'}${n.resource_name ? `: ${n.resource_name}` : ''}`}
+                        </span>
                         <button 
                             onClick={() => setNotifications(prev => prev.filter(x => x.id !== n.id))} 
                             className="text-indigo-200 hover:text-white p-1 rounded-md hover:bg-white/10 transition-colors"

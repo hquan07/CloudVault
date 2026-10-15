@@ -262,6 +262,11 @@ sequenceDiagram
 5. Metadata Service sends activity notifications over an authenticated
    WebSocket after Redis Pub/Sub delivery.
 
+The browser authenticates notification WebSockets in the first frame after the
+handshake. Access tokens are never placed in WebSocket query strings, preventing
+them from appearing in gateway/Uvicorn access logs, browser history or copied
+URLs.
+
 The frontend API client does not bypass Nginx. It calls same-origin gateway
 routes, and Nginx selects the backend service.
 
