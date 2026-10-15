@@ -21,7 +21,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
-from sqlalchemy import delete, select, func, update
+from sqlalchemy import delete, select, func, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -30,7 +30,7 @@ from app.config import settings
 from app.database import async_session, get_db
 from app.models import (
     AuditLog, User, RefreshToken, Project, ProjectFileRecord, ProjectMembership, ProjectPin,
-    ServiceAccount,
+    ServiceAccount, AccountDeletionRequest,
 )
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest, ChangePasswordRequest,
@@ -41,6 +41,7 @@ from app.schemas import (
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
     ProjectMemberCandidateResponse, ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
     ServiceAccountCreateRequest, ServiceAccountResponse, ServiceAccountIssuedResponse,
+    AccountDeletionImpactResponse, OwnedProjectSummary, ProjectTransferOwnershipRequest,
 )
 from app.auth import (
     hash_password, verify_password,
@@ -914,6 +915,120 @@ def _add_project_audit(
         resource_id=project.id,
         details_json={"project_name": project.name, "project_slug": project.slug, **(details or {})},
     ))
+
+
+@app.get("/api/v1/auth/account/deletion-impact", response_model=AccountDeletionImpactResponse)
+async def account_deletion_impact(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    owned_result = await db.execute(
+        select(Project).where(Project.created_by == user.id).order_by(Project.name.asc())
+    )
+    owned_projects = owned_result.scalars().all()
+    personal_file_count = await db.scalar(
+        select(func.count(ProjectFileRecord.id)).where(
+            ProjectFileRecord.user_id == user.id,
+            ProjectFileRecord.project_id.is_(None),
+        )
+    ) or 0
+    project_membership_count = await db.scalar(
+        select(func.count(ProjectMembership.id)).where(ProjectMembership.user_id == user.id)
+    ) or 0
+    active_session_count = await db.scalar(
+        select(func.count(RefreshToken.id)).where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked.is_(False),
+            RefreshToken.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+    ) or 0
+    created_service_account_count = await db.scalar(
+        select(func.count(ServiceAccount.id)).where(ServiceAccount.created_by == user.id)
+    ) or 0
+    # shared_links is owned by file-service models, so keep this count in a
+    # narrow SQL expression without introducing a conflicting ORM mapping.
+    active_shared_link_count = await db.scalar(
+        text("SELECT COUNT(*) FROM shared_links WHERE user_id = :user_id AND is_active = TRUE"),
+        {"user_id": user.id},
+    ) or 0
+
+    blockers: list[str] = []
+    if owned_projects:
+        blockers.append("OWNED_PROJECTS")
+    if user.role == "admin":
+        active_admin_count = await db.scalar(
+            select(func.count(User.id)).where(
+                User.role == "admin",
+                User.is_active.is_(True),
+                User.deletion_status == "active",
+            )
+        ) or 0
+        if active_admin_count <= 1:
+            blockers.append("LAST_SYSTEM_ADMIN")
+
+    return AccountDeletionImpactResponse(
+        deletion_status=user.deletion_status,
+        can_delete=not blockers and user.deletion_status == "active",
+        blockers=blockers,
+        personal_file_count=int(personal_file_count),
+        personal_storage_bytes=int(user.storage_used or 0),
+        owned_projects=[
+            OwnedProjectSummary(id=project.id, slug=project.slug, name=project.name)
+            for project in owned_projects
+        ],
+        project_membership_count=int(project_membership_count),
+        active_shared_link_count=int(active_shared_link_count),
+        active_session_count=int(active_session_count),
+        created_service_account_count=int(created_service_account_count),
+        scheduled_for=user.deletion_scheduled_at,
+    )
+
+
+@app.post("/api/v1/projects/{project_id}/transfer-ownership", response_model=ProjectResponse)
+async def transfer_project_ownership(
+    project_id: str,
+    req: ProjectTransferOwnershipRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project, membership = await _project_membership(db, project_id, user, {"admin"})
+    if project.created_by != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only the project owner can transfer ownership")
+    if req.new_owner_user_id == project.created_by:
+        raise HTTPException(status_code=409, detail="User already owns this project")
+
+    target_result = await db.execute(
+        select(ProjectMembership, User)
+        .join(User, User.id == ProjectMembership.user_id)
+        .where(
+            ProjectMembership.project_id == project.id,
+            ProjectMembership.user_id == req.new_owner_user_id,
+            ProjectMembership.role == "admin",
+        )
+    )
+    target_row = target_result.one_or_none()
+    if not target_row:
+        raise HTTPException(status_code=409, detail="New owner must be a project admin")
+    _, target_user = target_row
+    if not target_user.is_active or target_user.deletion_status != "active":
+        raise HTTPException(status_code=409, detail="New owner account must be active")
+
+    previous_owner_id = project.created_by
+    project.created_by = target_user.id
+    _add_project_audit(
+        db,
+        "PROJECT_OWNERSHIP_TRANSFERRED",
+        project,
+        user,
+        {"previous_owner_id": previous_owner_id, "new_owner_id": target_user.id},
+    )
+    await db.commit()
+    await db.refresh(project)
+    return _project_response(
+        project,
+        "admin" if user.role == "admin" else membership.role,
+        await _project_is_pinned(db, user.id, project.id),
+    )
 
 
 @app.get("/api/v1/projects", response_model=List[ProjectResponse])

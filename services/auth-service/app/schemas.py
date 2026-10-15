@@ -48,6 +48,10 @@ class MfaDisableRequest(MfaCodeRequest):
     current_password: str = Field(..., min_length=1, max_length=128)
 
 
+class ProjectTransferOwnershipRequest(BaseModel):
+    new_owner_user_id: str = Field(..., min_length=36, max_length=36)
+
+
 # ── Response Schemas ──
 
 class UserResponse(BaseModel):
@@ -123,6 +127,26 @@ class MfaSetupResponse(BaseModel):
 class MfaEnableResponse(BaseModel):
     detail: str
     recovery_codes: list[str]
+
+
+class OwnedProjectSummary(BaseModel):
+    id: str
+    slug: str
+    name: str
+
+
+class AccountDeletionImpactResponse(BaseModel):
+    deletion_status: str
+    can_delete: bool
+    blockers: list[str]
+    personal_file_count: int
+    personal_storage_bytes: int
+    owned_projects: list[OwnedProjectSummary]
+    project_membership_count: int
+    active_shared_link_count: int
+    active_session_count: int
+    created_service_account_count: int
+    scheduled_for: Optional[datetime] = None
 
 
 class ProjectCreateRequest(BaseModel):
