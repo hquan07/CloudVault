@@ -535,7 +535,7 @@ export default function DrivePage() {
               )}
               <button 
                 onClick={(e) => { e.stopPropagation(); setShareFolder(folder); }}
-                className={`p-2 text-gray-500 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg transition-all ${viewMode === 'list' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                className={`p-2 text-gray-500 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg transition-all ${viewMode === 'list' ? 'opacity-100' : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'}`}
                 title="Share folder"
               >
                 <Users size={18} />
@@ -556,7 +556,7 @@ export default function DrivePage() {
             >
               <button
                 onClick={(event) => { event.stopPropagation(); toggleSelection(file.id); }}
-                className={`absolute top-3 left-3 z-10 rounded-md bg-gray-950/80 p-1 transition-opacity ${selectedIds.has(file.id) ? 'opacity-100 text-cyan-400' : 'opacity-0 text-gray-400 group-hover:opacity-100'}`}
+                className={`absolute top-3 left-3 z-10 rounded-md bg-gray-950/80 p-1 transition-opacity ${selectedIds.has(file.id) ? 'opacity-100 text-cyan-400' : 'opacity-100 text-gray-400 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'}`}
                 aria-label={`Select ${file.original_name}`}
               >
                 {selectedIds.has(file.id) ? <CheckSquare size={17} /> : <Square size={17} />}
@@ -578,7 +578,7 @@ export default function DrivePage() {
                   <div className="text-xs text-gray-500 hidden sm:block w-32 shrink-0">{formatRelative(file.created_at)}</div>
                 )}
 
-                <div className={`flex space-x-1 transition-opacity ${viewMode === 'list' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                <div className={`flex space-x-1 transition-opacity ${viewMode === 'list' ? 'opacity-100' : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'}`}>
                   <button 
                     onClick={(e) => { e.stopPropagation(); handleToggleStar(file.id, !!file.is_starred); }}
                     className={`p-2 rounded-lg transition-colors ${file.is_starred ? 'text-yellow-500 hover:bg-gray-800' : 'text-gray-400 hover:text-yellow-500 hover:bg-gray-800'}`}

@@ -378,9 +378,12 @@ async def list_files(
 ):
     query = select(File).where(File.user_id == user.id, File.is_deleted == is_deleted)
 
+    # An omitted folder filter is used by aggregate views such as Recent and
+    # Starred, which must include files from every folder. The explicit
+    # "root" value is reserved for the root-level file browser.
     if folder_id is not None and folder_id != "root":
         query = query.where(File.folder_id == folder_id)
-    elif folder_id == "root" or folder_id is None:
+    elif folder_id == "root":
         query = query.where(File.folder_id == None)
     if is_starred is not None:
         query = query.where(File.is_starred == is_starred)

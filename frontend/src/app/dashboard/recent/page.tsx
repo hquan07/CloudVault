@@ -69,7 +69,7 @@ export default function RecentPage() {
                 <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-cyan-400">
                   <FileIcon size={24} />
                 </div>
-                <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex space-x-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
                   <button 
                     onClick={(e) => { e.stopPropagation(); handleToggleStar(file.id, !!file.is_starred); }}
                     className={`p-2 rounded-lg transition-colors ${file.is_starred ? 'text-yellow-500 hover:bg-gray-800' : 'text-gray-400 hover:text-yellow-500 hover:bg-gray-800'}`}

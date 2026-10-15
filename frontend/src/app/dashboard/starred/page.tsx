@@ -93,7 +93,7 @@ export default function StarredPage() {
                 <div className="w-12 h-12 rounded-xl bg-yellow-500/10 flex items-center justify-center text-yellow-500">
                   <FileIcon size={24} />
                 </div>
-                <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex space-x-1 transition-opacity opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
                   <button 
                     onClick={(e) => { e.stopPropagation(); handleUnstar(file.id); }} 
                     className="p-2 text-yellow-500 hover:bg-gray-800 rounded-lg transition-colors"
@@ -137,7 +137,7 @@ export default function StarredPage() {
               <div key={file.id} onClick={() => setPreviewProjectFile(file)} className="group cursor-pointer rounded-2xl border border-cyan-500/25 bg-gray-900 p-5 transition-all hover:border-cyan-400/60 hover:shadow-lg hover:shadow-cyan-900/10">
                 <div className="mb-4 flex items-start justify-between">
                   <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-cyan-500/10 text-cyan-400"><FileIcon size={24} /></div>
-                  <div className="flex space-x-1 opacity-0 transition-opacity group-hover:opacity-100">
+                  <div className="flex space-x-1 transition-opacity opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
                     <button onClick={(event) => { event.stopPropagation(); void handleProjectUnstar(file); }} className="rounded-lg p-2 text-yellow-500 transition-colors hover:bg-gray-800" title="Remove star"><Star size={18} className="fill-current" /></button>
                     <button onClick={(event) => { event.stopPropagation(); void handleProjectDownload(file); }} className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-800 hover:text-cyan-400" title="Download"><Download size={18} /></button>
                   </div>
