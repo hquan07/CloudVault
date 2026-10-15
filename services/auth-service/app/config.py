@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     AUTH_LOGIN_ATTEMPTS_PER_WINDOW: int = Field(default=5, ge=1, le=100)
     AUTH_REGISTER_ATTEMPTS_PER_WINDOW: int = Field(default=3, ge=1, le=100)
     AUTH_REFRESH_ATTEMPTS_PER_WINDOW: int = Field(default=20, ge=1, le=500)
+    ACCOUNT_DELETION_GRACE_DAYS: int = Field(default=7, ge=1, le=30)
 
     # Browser origins allowed only for direct API development. Production UI
     # uses same-origin requests through Nginx.

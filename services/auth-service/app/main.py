@@ -15,7 +15,7 @@ import hashlib
 import hmac
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Response, status
@@ -42,6 +42,7 @@ from app.schemas import (
     ProjectMemberCandidateResponse, ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
     ServiceAccountCreateRequest, ServiceAccountResponse, ServiceAccountIssuedResponse,
     AccountDeletionImpactResponse, OwnedProjectSummary, ProjectTransferOwnershipRequest,
+    AccountDeletionCancelRequest, AccountDeletionRequestCreate, AccountDeletionStatusResponse,
 )
 from app.auth import (
     hash_password, verify_password,
@@ -320,7 +321,9 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    if not user.is_active:
+    if user.deletion_status == "pending":
+        raise HTTPException(status_code=409, detail="ACCOUNT_PENDING_DELETION")
+    if not user.is_active or user.deletion_status != "active":
         raise HTTPException(status_code=403, detail="Account is disabled")
 
     if user.mfa_enabled:
@@ -917,11 +920,10 @@ def _add_project_audit(
     ))
 
 
-@app.get("/api/v1/auth/account/deletion-impact", response_model=AccountDeletionImpactResponse)
-async def account_deletion_impact(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def _build_account_deletion_impact(
+    user: User,
+    db: AsyncSession,
+) -> AccountDeletionImpactResponse:
     owned_result = await db.execute(
         select(Project).where(Project.created_by == user.id).order_by(Project.name.asc())
     )
@@ -981,6 +983,157 @@ async def account_deletion_impact(
         active_session_count=int(active_session_count),
         created_service_account_count=int(created_service_account_count),
         scheduled_for=user.deletion_scheduled_at,
+    )
+
+
+@app.get("/api/v1/auth/account/deletion-impact", response_model=AccountDeletionImpactResponse)
+async def account_deletion_impact(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _build_account_deletion_impact(user, db)
+
+
+@app.post("/api/v1/auth/account/deletion-request", response_model=AccountDeletionStatusResponse)
+async def request_account_deletion(
+    req: AccountDeletionRequestCreate,
+    request: Request,
+    authorization: str = Header(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if req.confirmation.strip().casefold() != user.email.casefold():
+        raise HTTPException(status_code=400, detail="Email confirmation does not match")
+    if not user.password_hash or not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if user.mfa_enabled:
+        if not req.mfa_code:
+            raise HTTPException(status_code=400, detail="Authentication code is required")
+        valid_mfa, used_recovery = _verify_mfa_code(user, req.mfa_code)
+        if not valid_mfa:
+            raise HTTPException(status_code=400, detail="Invalid authentication code")
+    else:
+        used_recovery = False
+
+    impact = await _build_account_deletion_impact(user, db)
+    if impact.blockers:
+        readable = ", ".join(impact.blockers)
+        raise HTTPException(status_code=409, detail=f"Resolve account deletion blockers: {readable}")
+
+    locked_result = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = locked_result.scalar_one()
+    if locked_user.deletion_status != "active":
+        raise HTTPException(status_code=409, detail="Account deletion is already in progress")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    execute_after = now + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
+    existing_result = await db.execute(
+        select(AccountDeletionRequest)
+        .where(AccountDeletionRequest.user_id == locked_user.id)
+        .with_for_update()
+    )
+    deletion_request = existing_result.scalar_one_or_none()
+    if deletion_request:
+        deletion_request.status = "scheduled"
+        deletion_request.execute_after = execute_after
+        deletion_request.attempt_count = 0
+        deletion_request.last_error = None
+        deletion_request.started_at = None
+        deletion_request.completed_at = None
+        deletion_request.cancelled_at = None
+    else:
+        deletion_request = AccountDeletionRequest(
+            user_id=locked_user.id,
+            status="scheduled",
+            execute_after=execute_after,
+        )
+        db.add(deletion_request)
+
+    locked_user.deletion_status = "pending"
+    locked_user.deletion_requested_at = now
+    locked_user.deletion_scheduled_at = execute_after
+    locked_user.is_active = False
+    revoke_result = await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == locked_user.id, RefreshToken.revoked.is_(False))
+        .values(revoked=True, revoked_at=now)
+    )
+    _add_security_audit(
+        db,
+        "ACCOUNT_DELETION_REQUESTED",
+        request,
+        user_id=locked_user.id,
+        details={
+            "execute_after": execute_after.isoformat(),
+            "refresh_sessions_revoked": revoke_result.rowcount or 0,
+            "used_recovery_code": used_recovery,
+        },
+    )
+    await db.commit()
+    await _blacklist_authorization_token(authorization)
+    return AccountDeletionStatusResponse(
+        detail="Account deletion scheduled",
+        status="pending",
+        scheduled_for=execute_after,
+    )
+
+
+@app.post("/api/v1/auth/account/deletion-cancel", response_model=AccountDeletionStatusResponse)
+async def cancel_account_deletion(
+    req: AccountDeletionCancelRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    await _enforce_auth_rate_limit(
+        request, "deletion-cancel", req.email, settings.AUTH_LOGIN_ATTEMPTS_PER_WINDOW
+    )
+    result = await db.execute(
+        select(User).where(func.lower(User.email) == req.email.lower()).with_for_update()
+    )
+    user = result.scalar_one_or_none()
+    if not user or not user.password_hash or not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.deletion_status not in {"pending", "failed"}:
+        raise HTTPException(status_code=409, detail="Account deletion cannot be cancelled")
+    if user.mfa_enabled:
+        if not req.mfa_code:
+            raise HTTPException(status_code=428, detail="MFA_REQUIRED")
+        valid_mfa, used_recovery = _verify_mfa_code(user, req.mfa_code)
+        if not valid_mfa:
+            raise HTTPException(status_code=401, detail="Invalid authentication code")
+    else:
+        used_recovery = False
+
+    deletion_result = await db.execute(
+        select(AccountDeletionRequest)
+        .where(AccountDeletionRequest.user_id == user.id)
+        .with_for_update()
+    )
+    deletion_request = deletion_result.scalar_one_or_none()
+    if not deletion_request or deletion_request.status not in {"scheduled", "failed"}:
+        raise HTTPException(status_code=409, detail="Account deletion can no longer be cancelled")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    deletion_request.status = "cancelled"
+    deletion_request.cancelled_at = now
+    deletion_request.last_error = None
+    user.deletion_status = "active"
+    user.deletion_requested_at = None
+    user.deletion_scheduled_at = None
+    user.is_active = True
+    _add_security_audit(
+        db,
+        "ACCOUNT_DELETION_CANCELLED",
+        request,
+        user_id=user.id,
+        details={"used_recovery_code": used_recovery},
+    )
+    await db.commit()
+    return AccountDeletionStatusResponse(
+        detail="Account deletion cancelled. Sign in again to continue.",
+        status="active",
     )
 
 

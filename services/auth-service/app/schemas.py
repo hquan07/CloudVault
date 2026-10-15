@@ -52,6 +52,18 @@ class ProjectTransferOwnershipRequest(BaseModel):
     new_owner_user_id: str = Field(..., min_length=36, max_length=36)
 
 
+class AccountDeletionRequestCreate(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    confirmation: str = Field(..., min_length=1, max_length=255)
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=32)
+
+
+class AccountDeletionCancelRequest(BaseModel):
+    email: EmailStr
+    current_password: str = Field(..., min_length=1, max_length=128)
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=32)
+
+
 # ── Response Schemas ──
 
 class UserResponse(BaseModel):
@@ -146,6 +158,12 @@ class AccountDeletionImpactResponse(BaseModel):
     active_shared_link_count: int
     active_session_count: int
     created_service_account_count: int
+    scheduled_for: Optional[datetime] = None
+
+
+class AccountDeletionStatusResponse(BaseModel):
+    detail: str
+    status: str
     scheduled_for: Optional[datetime] = None
 
 
