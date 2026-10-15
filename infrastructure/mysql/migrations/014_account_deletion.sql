@@ -1,19 +1,40 @@
 -- Safe account deletion lifecycle, ownership transfer support and purge queue.
 
-ALTER TABLE users
-    ADD COLUMN deletion_status ENUM('active', 'pending', 'purging', 'failed', 'deleted')
-        NOT NULL DEFAULT 'active' AFTER mfa_recovery_codes,
-    ADD COLUMN deletion_requested_at TIMESTAMP NULL AFTER deletion_status,
-    ADD COLUMN deletion_scheduled_at TIMESTAMP NULL AFTER deletion_requested_at,
-    ADD COLUMN deletion_completed_at TIMESTAMP NULL AFTER deletion_scheduled_at,
-    ADD COLUMN anonymized_at TIMESTAMP NULL AFTER deletion_completed_at,
-    ADD INDEX idx_users_deletion_status (deletion_status, deletion_scheduled_at);
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='deletion_status') = 0,
+    'ALTER TABLE users ADD COLUMN deletion_status ENUM(''active'', ''pending'', ''purging'', ''failed'', ''deleted'') NOT NULL DEFAULT ''active'' AFTER mfa_recovery_codes',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-ALTER TABLE service_accounts
-    DROP FOREIGN KEY fk_service_accounts_created_by,
-    MODIFY COLUMN created_by CHAR(36) NULL,
-    ADD CONSTRAINT fk_service_accounts_created_by FOREIGN KEY (created_by)
-        REFERENCES users(id) ON DELETE SET NULL;
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='deletion_requested_at') = 0,
+    'ALTER TABLE users ADD COLUMN deletion_requested_at TIMESTAMP NULL AFTER deletion_status', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='deletion_scheduled_at') = 0,
+    'ALTER TABLE users ADD COLUMN deletion_scheduled_at TIMESTAMP NULL AFTER deletion_requested_at', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='deletion_completed_at') = 0,
+    'ALTER TABLE users ADD COLUMN deletion_completed_at TIMESTAMP NULL AFTER deletion_scheduled_at', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='anonymized_at') = 0,
+    'ALTER TABLE users ADD COLUMN anonymized_at TIMESTAMP NULL AFTER deletion_completed_at', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='users' AND index_name='idx_users_deletion_status') = 0,
+    'CREATE INDEX idx_users_deletion_status ON users(deletion_status, deletion_scheduled_at)', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='service_accounts' AND constraint_name='fk_service_accounts_created_by') > 0,
+    'ALTER TABLE service_accounts DROP FOREIGN KEY fk_service_accounts_created_by', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+ALTER TABLE service_accounts MODIFY COLUMN created_by CHAR(36) NULL;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='service_accounts' AND constraint_name='fk_service_accounts_created_by') = 0,
+    'ALTER TABLE service_accounts ADD CONSTRAINT fk_service_accounts_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE account_deletion_requests (
     id CHAR(36) PRIMARY KEY DEFAULT (UUID()),

@@ -16,6 +16,7 @@ import {
 import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 import { ProjectUploadQueue } from '@/components/ProjectUploadQueue';
+import { useAuth } from '@/lib/auth-context';
 
 type Tab = 'files' | 'trash' | 'members' | 'integrations' | 'operations' | 'policy' | 'activity';
 
@@ -44,6 +45,7 @@ function activityResourceName(activity: AuditActivity): string {
 }
 
 export default function ProjectDetailPage() {
+  const { user } = useAuth();
   const params = useParams<{ projectId: string }>();
   const router = useRouter();
   const projectId = params.projectId;
@@ -415,6 +417,22 @@ export default function ProjectDetailPage() {
     } catch (err) { setError(errorMessage(err)); }
   };
 
+  const transferOwnership = async (member: ProjectMember) => {
+    if (!project || !window.confirm(
+      `Transfer ownership of ${project.name} to ${member.username}? Project data and service accounts will remain unchanged.`,
+    )) return;
+    setLifecycleBusy(true);
+    setError('');
+    try {
+      setProject(await projectApi.transferOwnership(projectId, member.user_id));
+      await refreshActivity();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
   const createAccount = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -664,7 +682,7 @@ export default function ProjectDetailPage() {
             {memberCandidates.length === 0 && memberQuery.trim().length >= 2 && !memberSearchLoading && <p className="text-sm text-gray-500">Search to find active users who are not already members.</p>}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-end"><label className="text-sm text-gray-300">Role<select name="role" className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label><button disabled={!selectedCandidateId} className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-medium text-gray-950 disabled:opacity-40"><UserPlus size={17} /> Add member</button></div>
           </form>}
-          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{members.map((member) => <div key={member.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-800 font-semibold text-gray-300">{member.username.charAt(0).toUpperCase()}</div><div><div className="font-medium text-white">{member.username}</div><div className="text-sm text-gray-500">{member.email}</div></div></div><div className="flex items-center gap-2">{isAdmin ? <select value={member.role} onChange={(event) => void changeMemberRole(member, event.target.value as ProjectMember['role'])} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm capitalize text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select> : <span className="rounded-full border border-gray-700 px-3 py-1 text-xs capitalize text-gray-300">{member.role}</span>}{isAdmin && <button onClick={() => void removeMember(member)} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></div>)}</div></div>
+          <div className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900"><div className="divide-y divide-gray-800">{members.map((member) => <div key={member.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-800 font-semibold text-gray-300">{member.username.charAt(0).toUpperCase()}</div><div><div className="flex items-center gap-2 font-medium text-white">{member.username}{project?.created_by === member.user_id && <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">Owner</span>}</div><div className="text-sm text-gray-500">{member.email}</div></div></div><div className="flex flex-wrap items-center gap-2">{isAdmin ? <select value={member.role} onChange={(event) => void changeMemberRole(member, event.target.value as ProjectMember['role'])} className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm capitalize text-white"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select> : <span className="rounded-full border border-gray-700 px-3 py-1 text-xs capitalize text-gray-300">{member.role}</span>}{isAdmin && member.role === 'admin' && project?.created_by !== member.user_id && (project?.created_by === user?.id || user?.role === 'admin') && <button disabled={lifecycleBusy} onClick={() => void transferOwnership(member)} className="inline-flex items-center gap-2 rounded-lg border border-amber-500/25 px-3 py-2 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"><Shield size={15} /> Transfer ownership</button>}{isAdmin && <button onClick={() => void removeMember(member)} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={17} /></button>}</div></div>)}</div></div>
         </section>
       )}
 

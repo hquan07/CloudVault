@@ -75,6 +75,7 @@ class UserResponse(BaseModel):
     is_active: bool
     is_verified: bool
     mfa_enabled: bool
+    deletion_status: str
     oauth_provider: str
     storage_quota: int
     storage_used: int

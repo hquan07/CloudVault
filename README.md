@@ -27,7 +27,8 @@ and an operations plane for quota and object-integrity monitoring.
   Redis-backed revocation.
 - Account Settings for profile/avatar, TOTP MFA with one-time recovery codes,
   recent security activity, per-device session revocation, browser preferences
-  and privacy exports.
+  and privacy exports. Account deletion uses impact checks, project ownership
+  transfer, a seven-day cancellation window and asynchronous object cleanup.
 - Full-text search through authenticated Elasticsearch.
 - In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
 - Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events
@@ -52,7 +53,7 @@ and an operations plane for quota and object-integrity monitoring.
 - `project-operations` reconciles recorded usage, metadata and MinIO objects;
   detects stale uploads, missing/orphan objects and expired files.
 - Prometheus metrics, Grafana dashboard and Alertmanager rules cover project
-  quota, integrity and operation health.
+  quota, integrity, operation health and failed account-data purges.
 - OpenTelemetry traces from the API services are exported to Jaeger.
 - Backup, verification, restore-drill and selective project-recovery scripts are
   provided under `scripts/operations/`.
@@ -230,6 +231,7 @@ bind to loopback; persistence and messaging services stay Docker-internal.
 | Alertmanager | `9093` | Loopback (`INFRA_BIND_ADDRESS`) | Quota, integrity and operation alerts |
 | Jaeger | `16686` | Loopback (`INFRA_BIND_ADDRESS`) | Distributed tracing UI |
 | Project Operations | None (`9100` internal) | Docker network only | Reconciliation/retention metrics and health |
+| Account Deletion Worker | None (`9101` internal) | Docker network only | Delayed personal-data purge metrics and health |
 | MySQL / Redis / Elasticsearch / Kafka / ZooKeeper | None | Docker network only | Internal data, cache, search and messaging |
 
 ## 🔐 Security Boundaries
@@ -254,6 +256,9 @@ bind to loopback; persistence and messaging services stay Docker-internal.
   uses the `CORS_ALLOWED_ORIGINS` allowlist instead of a wildcard.
 - Notification WebSockets authenticate in their first frame so access tokens do
   not appear in request URLs or access logs.
+- Account deletion is never a direct user-row delete: ownership blockers are
+  resolved first, sessions are revoked immediately, and a dedicated worker
+  purges personal objects before anonymizing identity data.
 - Application containers run without Linux capabilities, cannot gain new
   privileges, use non-root users, and mount development source read-only.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a

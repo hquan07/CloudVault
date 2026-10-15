@@ -143,6 +143,7 @@ def _user_response(user: User) -> UserResponse:
         is_active=user.is_active,
         is_verified=user.is_verified,
         mfa_enabled=user.mfa_enabled,
+        deletion_status=user.deletion_status,
         oauth_provider=user.oauth_provider,
         storage_quota=user.storage_quota,
         storage_used=user.storage_used,
@@ -156,6 +157,12 @@ def _request_context(request: Request) -> tuple[str | None, str | None]:
     client_ip = (forwarded or (request.client.host if request.client else "")).strip()[:45] or None
     user_agent = request.headers.get("user-agent", "").strip()[:500] or None
     return client_ip, user_agent
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
 
 def _new_refresh_session(
@@ -655,6 +662,8 @@ async def list_security_events(
         "MFA_ENABLED",
         "MFA_DISABLED",
         "MFA_RECOVERY_USED",
+        "ACCOUNT_DELETION_REQUESTED",
+        "ACCOUNT_DELETION_CANCELLED",
     )
     result = await db.execute(
         select(AuditLog)
@@ -982,7 +991,7 @@ async def _build_account_deletion_impact(
         active_shared_link_count=int(active_shared_link_count),
         active_session_count=int(active_session_count),
         created_service_account_count=int(created_service_account_count),
-        scheduled_for=user.deletion_scheduled_at,
+        scheduled_for=_as_utc(user.deletion_scheduled_at),
     )
 
 
@@ -1076,7 +1085,7 @@ async def request_account_deletion(
     return AccountDeletionStatusResponse(
         detail="Account deletion scheduled",
         status="pending",
-        scheduled_for=execute_after,
+        scheduled_for=_as_utc(execute_after),
     )
 
 

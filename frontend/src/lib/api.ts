@@ -140,6 +140,26 @@ export interface MfaSetup {
   otpauth_uri: string;
 }
 
+export interface AccountDeletionImpact {
+  deletion_status: 'active' | 'pending' | 'purging' | 'failed' | 'deleted';
+  can_delete: boolean;
+  blockers: string[];
+  personal_file_count: number;
+  personal_storage_bytes: number;
+  owned_projects: Array<{ id: string; slug: string; name: string }>;
+  project_membership_count: number;
+  active_shared_link_count: number;
+  active_session_count: number;
+  created_service_account_count: number;
+  scheduled_for: string | null;
+}
+
+export interface AccountDeletionStatus {
+  detail: string;
+  status: string;
+  scheduled_for: string | null;
+}
+
 /* ── Auth API ── */
 export const authApi = {
   register: (data: { email: string; username: string; password: string }) =>
@@ -191,6 +211,19 @@ export const authApi = {
 
   revokeAllSessions: () =>
     request<{ detail: string }>(`${AUTH_BASE}/auth/sessions`, { method: 'DELETE' }),
+
+  getDeletionImpact: () =>
+    request<AccountDeletionImpact>(`${AUTH_BASE}/auth/account/deletion-impact`),
+
+  requestDeletion: (data: { current_password: string; confirmation: string; mfa_code?: string }) =>
+    request<AccountDeletionStatus>(`${AUTH_BASE}/auth/account/deletion-request`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  cancelDeletion: (data: { email: string; current_password: string; mfa_code?: string }) =>
+    request<AccountDeletionStatus>(`${AUTH_BASE}/auth/account/deletion-cancel`, {
+      method: 'POST', body: JSON.stringify(data),
+    }, false),
 };
 
 /* ── File API ── */
@@ -737,6 +770,11 @@ export const projectApi = {
 
   removeMember: (projectId: string, memberId: string) =>
     request(`${AUTH_BASE}/projects/${projectId}/members/${memberId}`, { method: 'DELETE' }),
+
+  transferOwnership: (projectId: string, newOwnerUserId: string) =>
+    request<Project>(`${AUTH_BASE}/projects/${projectId}/transfer-ownership`, {
+      method: 'POST', body: JSON.stringify({ new_owner_user_id: newOwnerUserId }),
+    }),
 
   listServiceAccounts: (projectId: string) =>
     request<ServiceAccount[]>(`${AUTH_BASE}/projects/${projectId}/service-accounts`),

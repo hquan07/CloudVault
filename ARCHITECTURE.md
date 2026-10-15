@@ -196,6 +196,22 @@ hashes. Disabling MFA revokes all refresh sessions and blacklists the current
 access token. Account preferences are browser-local and never change project
 authorization or retention policy.
 
+Account deletion is a delayed lifecycle rather than a direct `DELETE users`:
+
+1. Auth Service reports personal storage, sessions, shares, project memberships,
+   service-account provenance and owned projects.
+2. Owned projects must be transferred to another active project administrator;
+   the last active system administrator cannot schedule deletion.
+3. Password and MFA confirmation moves the account to `pending`, revokes refresh
+   sessions, blacklists the current access token and starts a configurable
+   seven-day cancellation window.
+4. The account-deletion worker claims due requests under a row lock, aborts
+   pending project uploads, deletes personal MinIO objects before metadata,
+   removes access/share records and anonymizes the retained user identity.
+5. Files and service credentials belonging to projects remain with those
+   projects. Project upload attribution and audit history are retained without
+   the deleted user's PII.
+
 ### Project applications
 
 1. A project administrator creates a service account and selects scopes.
@@ -340,6 +356,12 @@ project activity feed.
 The worker exports Prometheus metrics on internal port `9100`. Prometheus
 evaluates quota, drift, object-integrity, stale-upload and worker-health rules;
 Grafana visualizes them and Alertmanager receives firing alerts.
+
+`account-deletion-worker` is a separate periodic controller on internal port
+`9101`. It retries failed purges with backoff and exports pending, failed,
+completed and error metrics. A failed purge leaves the account locked and raises
+an Alertmanager signal; operators retry through the worker instead of manually
+deleting database rows or MinIO objects.
 
 Reconciliation repair and retention deletion are opt-in. The safe rollout is:
 

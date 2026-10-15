@@ -16,6 +16,7 @@ interface User {
   is_active: boolean;
   is_verified: boolean;
   mfa_enabled: boolean;
+  deletion_status: 'active' | 'pending' | 'purging' | 'failed' | 'deleted';
   oauth_provider: 'local' | 'google' | 'github';
   storage_quota: number;
   storage_used: number;

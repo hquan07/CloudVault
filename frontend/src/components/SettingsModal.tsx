@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   BadgeCheck,
   BellRing,
   CalendarDays,
@@ -26,7 +27,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
-import { ApiError, AuthSession, SecurityEvent, authApi } from '@/lib/api';
+import { AccountDeletionImpact, ApiError, AuthSession, SecurityEvent, authApi } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import {
   AccountPreferences,
@@ -67,6 +68,8 @@ function securityActionLabel(action: string) {
     MFA_ENABLED: 'Multi-factor authentication enabled',
     MFA_DISABLED: 'Multi-factor authentication disabled',
     MFA_RECOVERY_USED: 'Recovery code used',
+    ACCOUNT_DELETION_REQUESTED: 'Account deletion scheduled',
+    ACCOUNT_DELETION_CANCELLED: 'Account deletion cancelled',
   };
   return labels[action] || action.replaceAll('_', ' ').toLowerCase();
 }
@@ -98,6 +101,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [mfaSetup, setMfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [mfaBusy, setMfaBusy] = useState(false);
+  const [deletionImpact, setDeletionImpact] = useState<AccountDeletionImpact | null>(null);
+  const [deletionLoading, setDeletionLoading] = useState(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [showDeletionReview, setShowDeletionReview] = useState(false);
+  const [deletionPassword, setDeletionPassword] = useState('');
+  const [deletionMfaCode, setDeletionMfaCode] = useState('');
+  const [deletionConfirmation, setDeletionConfirmation] = useState('');
 
   const resetMessages = () => {
     setError('');
@@ -126,6 +136,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   }, []);
 
+  const loadDeletionImpact = useCallback(async () => {
+    setDeletionLoading(true);
+    try {
+      setDeletionImpact(await authApi.getDeletionImpact());
+    } catch (loadError: unknown) {
+      setError(errorMessage(loadError, 'Failed to review account deletion impact'));
+    } finally {
+      setDeletionLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const handleEsc = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
@@ -140,6 +161,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const selectSection = (next: SettingsSection) => {
     resetMessages();
     setSection(next);
+    if (next === 'privacy' && !deletionImpact) void loadDeletionImpact();
   };
 
   const saveProfile = async (event: React.FormEvent) => {
@@ -272,6 +294,25 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     localStorage.removeItem('cloudvault_recent_searches');
     resetMessages();
     setSuccess('Recent searches cleared from this browser.');
+  };
+
+  const requestAccountDeletion = async (event: React.FormEvent) => {
+    event.preventDefault();
+    resetMessages();
+    setDeletionBusy(true);
+    try {
+      const result = await authApi.requestDeletion({
+        current_password: deletionPassword,
+        confirmation: deletionConfirmation.trim(),
+        ...(user.mfa_enabled && deletionMfaCode ? { mfa_code: deletionMfaCode } : {}),
+      });
+      setSuccess(`Account deletion scheduled for ${new Date(result.scheduled_for || '').toLocaleString()}. Redirecting to sign in…`);
+      window.setTimeout(() => void logout(), 1200);
+    } catch (deletionError: unknown) {
+      setError(errorMessage(deletionError, 'Failed to schedule account deletion'));
+      setDeletionBusy(false);
+      void loadDeletionImpact();
+    }
   };
 
   const beginMfaSetup = async () => {
@@ -510,6 +551,34 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <div className="rounded-2xl border border-gray-800 bg-gray-950/35 p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h4 className="flex items-center gap-2 font-semibold text-white"><Download size={18} className="text-cyan-400" />Download account information</h4><p className="mt-1 max-w-lg text-sm text-gray-500">Export your profile, active-session metadata, recent security activity and browser preferences as JSON. Passwords and tokens are never included.</p></div><button type="button" onClick={downloadAccountData} className="shrink-0 rounded-xl border border-cyan-500/30 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10">Download JSON</button></div></div>
                 <div className="rounded-2xl border border-gray-800 bg-gray-950/35 p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h4 className="flex items-center gap-2 font-semibold text-white"><SearchX size={18} className="text-cyan-400" />Recent searches</h4><p className="mt-1 max-w-lg text-sm text-gray-500">Search history is stored only in this browser and is not part of project audit logs.</p></div><button type="button" onClick={clearRecentSearches} className="shrink-0 rounded-xl border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-cyan-500/30 hover:text-cyan-300">Clear history</button></div></div>
                 <div className="rounded-2xl border border-red-500/20 bg-red-950/10 p-5"><h4 className="font-semibold text-red-200">Account access</h4><p className="mt-1 text-sm text-gray-500">Immediately revoke every refresh session, including this browser. Existing access tokens are blacklisted for this request and otherwise expire within their short lifetime.</p><button type="button" onClick={revokeAllSessions} disabled={revokingId === 'all'} className="mt-4 flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:opacity-50">{revokingId === 'all' ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out all devices</button></div>
+
+                <section className="overflow-hidden rounded-2xl border border-red-500/30 bg-red-950/10">
+                  <div className="border-b border-red-500/20 p-5"><h4 className="flex items-center gap-2 font-semibold text-red-200"><AlertTriangle size={18} /> Danger zone</h4><p className="mt-1 text-sm text-gray-500">Deletion is delayed for 7 days. Personal storage is purged; project data and anonymized audit history remain.</p></div>
+                  <div className="p-5">
+                    {deletionLoading && !deletionImpact ? <div className="flex justify-center py-6 text-gray-500"><Loader2 className="animate-spin" /></div> : deletionImpact && (
+                      <div className="space-y-4">
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-3"><p className="text-xs uppercase tracking-wide text-gray-600">Personal files</p><p className="mt-1 font-semibold text-gray-200">{deletionImpact.personal_file_count}</p><p className="text-xs text-gray-500">{formatBytes(deletionImpact.personal_storage_bytes)}</p></div>
+                          <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-3"><p className="text-xs uppercase tracking-wide text-gray-600">Memberships</p><p className="mt-1 font-semibold text-gray-200">{deletionImpact.project_membership_count}</p><p className="text-xs text-gray-500">removed at purge</p></div>
+                          <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-3"><p className="text-xs uppercase tracking-wide text-gray-600">Active shares</p><p className="mt-1 font-semibold text-gray-200">{deletionImpact.active_shared_link_count}</p><p className="text-xs text-gray-500">revoked at purge</p></div>
+                        </div>
+
+                        {deletionImpact.owned_projects.length > 0 && <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4"><p className="text-sm font-medium text-amber-200">Transfer or delete owned projects first</p><div className="mt-2 space-y-2">{deletionImpact.owned_projects.map((project) => <a key={project.id} href={`/dashboard/projects/${project.id}`} className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2 text-sm text-gray-300 hover:border-amber-500/30"><span>{project.name}</span><span className="text-xs text-amber-300">Open project →</span></a>)}</div></div>}
+                        {deletionImpact.blockers.includes('LAST_SYSTEM_ADMIN') && <p className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm text-amber-200">Promote another active system administrator before deleting this account.</p>}
+
+                        {!showDeletionReview ? <button type="button" onClick={() => setShowDeletionReview(true)} disabled={!deletionImpact.can_delete} className="flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-2.5 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={16} /> Review account deletion</button> : (
+                          <form onSubmit={requestAccountDeletion} className="space-y-4 rounded-xl border border-red-500/25 bg-gray-950/40 p-4">
+                            <div><p className="text-sm font-medium text-red-200">This immediately signs out every device.</p><p className="mt-1 text-xs leading-5 text-gray-500">You may cancel during the 7-day waiting period by signing in again and confirming your credentials. Purging cannot be cancelled after it starts.</p></div>
+                            <label className="block text-sm text-gray-400">Current password<input type="password" autoComplete="current-password" required value={deletionPassword} onChange={(event) => setDeletionPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-red-500/60" /></label>
+                            {user.mfa_enabled && <label className="block text-sm text-gray-400">Authenticator or recovery code<input type="text" autoComplete="one-time-code" required value={deletionMfaCode} onChange={(event) => setDeletionMfaCode(event.target.value.trim())} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 font-mono text-white outline-none focus:border-red-500/60" /></label>}
+                            <label className="block text-sm text-gray-400">Type your email to confirm<input type="email" required value={deletionConfirmation} onChange={(event) => setDeletionConfirmation(event.target.value)} placeholder={user.email} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none placeholder:text-gray-700 focus:border-red-500/60" /></label>
+                            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={() => setShowDeletionReview(false)} className="rounded-xl border border-gray-700 px-4 py-2.5 text-sm text-gray-300">Cancel</button><button disabled={deletionBusy || deletionConfirmation.trim().toLowerCase() !== user.email.toLowerCase() || !deletionPassword || (user.mfa_enabled && !deletionMfaCode)} className="flex items-center justify-center gap-2 rounded-xl bg-red-500 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{deletionBusy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />} Schedule permanent deletion</button></div>
+                          </form>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </section>
               </div>
             )}
           </main>
