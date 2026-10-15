@@ -1,0 +1,83 @@
+import hashlib
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "services" / "auth-service"))
+
+os.environ.setdefault("MYSQL_PASSWORD", "m" * 32)
+os.environ.setdefault("REDIS_PASSWORD", "r" * 32)
+os.environ.setdefault("JWT_SECRET_KEY", "j" * 32)
+
+from app import auth  # noqa: E402
+from app.schemas import RegisterRequest  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+
+
+class FakeRedis:
+    def __init__(self):
+        self.counts: dict[str, int] = {}
+        self.keys: list[str] = []
+
+    async def eval(self, _script, _key_count, key, window_seconds):
+        self.keys.append(key)
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return [self.counts[key], int(window_seconds)]
+
+
+class BrokenRedis:
+    async def eval(self, *_args):
+        raise ConnectionError("unavailable")
+
+
+class AuthenticationSecurityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.original_redis = auth.redis_client
+
+    async def asyncTearDown(self):
+        auth.redis_client = self.original_redis
+
+    async def test_rate_limit_hashes_identifier_and_enforces_threshold(self):
+        fake = FakeRedis()
+        auth.redis_client = fake
+        identifier = "127.0.0.1:user@example.com"
+
+        await auth.enforce_rate_limit("login", identifier, limit=2, window_seconds=60)
+        await auth.enforce_rate_limit("login", identifier, limit=2, window_seconds=60)
+        with self.assertRaises(auth.RateLimitExceeded) as raised:
+            await auth.enforce_rate_limit("login", identifier, limit=2, window_seconds=60)
+
+        self.assertEqual(raised.exception.retry_after, 60)
+        self.assertNotIn(identifier, fake.keys[0])
+        self.assertIn(hashlib.sha256(identifier.encode()).hexdigest(), fake.keys[0])
+
+    async def test_rate_limiter_fails_open_when_redis_is_unavailable(self):
+        auth.redis_client = BrokenRedis()
+        with patch.object(auth.logger, "exception") as logged:
+            await auth.enforce_rate_limit("login", "client", limit=1, window_seconds=60)
+        logged.assert_called_once()
+
+    def test_registration_requires_twelve_character_password(self):
+        with self.assertRaises(ValidationError):
+            RegisterRequest(email="user@example.com", username="user", password="shortpass")
+
+        request = RegisterRequest(
+            email="user@example.com",
+            username="user",
+            password="a-long-passphrase",
+        )
+        self.assertEqual(request.username, "user")
+
+    def test_refresh_token_is_stored_as_hash(self):
+        raw, token_hash, expires_at = auth.create_refresh_token()
+        self.assertNotEqual(raw, token_hash)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), token_hash)
+        self.assertGreater(expires_at.timestamp(), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -15,7 +15,7 @@ import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Query, Response, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import delete, select, func, update
@@ -30,9 +30,9 @@ from app.models import (
     ServiceAccount,
 )
 from app.schemas import (
-    RegisterRequest, LoginRequest, RefreshRequest,
+    RegisterRequest, LoginRequest, RefreshRequest, ChangePasswordRequest,
     UpdateProfileRequest, AuthResponse, MeResponse,
-    MessageResponse, UserResponse, TokenPair,
+    MessageResponse, SessionResponse, UserResponse, TokenPair,
     AdminStatsResponse, ProjectCreateRequest, ProjectDeleteRequest, ProjectUpdateRequest,
     ProjectMembershipRequest, ProjectMembershipRoleRequest,
     ProjectMemberCandidateResponse, ProjectMembershipResponse, ProjectResponse, ProjectUsageResponse,
@@ -43,6 +43,7 @@ from app.auth import (
     create_access_token, create_refresh_token,
     decode_access_token, blacklist_token, is_token_blacklisted,
     init_redis, close_redis, create_service_token,
+    enforce_rate_limit, RateLimitExceeded,
 )
 from typing import List
 from pydantic import BaseModel
@@ -85,7 +86,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -138,6 +139,82 @@ def _user_response(user: User) -> UserResponse:
     )
 
 
+def _request_context(request: Request) -> tuple[str | None, str | None]:
+    forwarded = request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for", "").split(",")[0]
+    client_ip = (forwarded or (request.client.host if request.client else "")).strip()[:45] or None
+    user_agent = request.headers.get("user-agent", "").strip()[:500] or None
+    return client_ip, user_agent
+
+
+def _new_refresh_session(user_id: str, request: Request) -> tuple[str, RefreshToken]:
+    raw_refresh, refresh_hash, expires_at = create_refresh_token()
+    client_ip, user_agent = _request_context(request)
+    return raw_refresh, RefreshToken(
+        user_id=user_id,
+        token_hash=refresh_hash,
+        expires_at=expires_at,
+        ip_address=client_ip,
+        user_agent=user_agent,
+    )
+
+
+def _add_security_audit(
+    db: AsyncSession,
+    action: str,
+    request: Request,
+    *,
+    user_id: str | None = None,
+    resource_id: str | None = None,
+    details: dict | None = None,
+) -> None:
+    client_ip, user_agent = _request_context(request)
+    db.add(AuditLog(
+        user_id=user_id,
+        action=action,
+        resource_type="user",
+        resource_id=resource_id or user_id,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        details_json=details or {},
+    ))
+
+
+async def _enforce_auth_rate_limit(
+    request: Request,
+    scope: str,
+    subject: str,
+    limit: int,
+) -> None:
+    client_ip, _ = _request_context(request)
+    try:
+        await enforce_rate_limit(
+            scope,
+            f"{client_ip or 'unknown'}:{subject.casefold()}",
+            limit=limit,
+            window_seconds=settings.AUTH_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except RateLimitExceeded as error:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many authentication attempts. Try again later.",
+            headers={"Retry-After": str(error.retry_after)},
+        )
+
+
+async def _blacklist_authorization_token(authorization: str | None) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return
+    try:
+        payload = decode_access_token(authorization.split(" ", 1)[1])
+        jti = payload.get("jti")
+        if jti:
+            exp = payload.get("exp", 0)
+            ttl = max(int(exp - datetime.now(timezone.utc).timestamp()), 60)
+            await blacklist_token(jti, ttl)
+    except Exception:
+        return
+
+
 # ── Routes ──
 
 @app.get("/health")
@@ -146,7 +223,10 @@ async def health():
 
 
 @app.post("/api/v1/auth/register", response_model=AuthResponse, status_code=201)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(req: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await _enforce_auth_rate_limit(
+        request, "register", req.email, settings.AUTH_REGISTER_ATTEMPTS_PER_WINDOW
+    )
     # Check duplicate email
     existing = await db.execute(select(User).where(User.email == req.email))
     if existing.scalar_one_or_none():
@@ -170,14 +250,9 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     # Generate tokens
     access = create_access_token(user.id, user.email)
-    raw_refresh, refresh_hash, expires_at = create_refresh_token()
-
-    rt = RefreshToken(
-        user_id=user.id,
-        token_hash=refresh_hash,
-        expires_at=expires_at,
-    )
+    raw_refresh, rt = _new_refresh_session(user.id, request)
     db.add(rt)
+    _add_security_audit(db, "USER_REGISTERED", request, user_id=user.id)
     await db.commit()
 
     return AuthResponse(
@@ -187,11 +262,23 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/auth/login", response_model=AuthResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await _enforce_auth_rate_limit(
+        request, "login", req.email, settings.AUTH_LOGIN_ATTEMPTS_PER_WINDOW
+    )
     result = await db.execute(select(User).where(User.email == req.email))
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash or not verify_password(req.password, user.password_hash):
+        _add_security_audit(
+            db,
+            "USER_LOGIN_FAILED",
+            request,
+            user_id=user.id if user else None,
+            resource_id=user.id if user else None,
+            details={"reason": "invalid_credentials"},
+        )
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not user.is_active:
@@ -202,14 +289,9 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     await db.flush()
 
     access = create_access_token(user.id, user.email)
-    raw_refresh, refresh_hash, expires_at = create_refresh_token()
-
-    rt = RefreshToken(
-        user_id=user.id,
-        token_hash=refresh_hash,
-        expires_at=expires_at,
-    )
+    raw_refresh, rt = _new_refresh_session(user.id, request)
     db.add(rt)
+    _add_security_audit(db, "USER_LOGGED_IN", request, user_id=user.id)
     await db.commit()
 
     return AuthResponse(
@@ -220,22 +302,18 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/v1/auth/logout", response_model=MessageResponse)
 async def logout(
+    request: Request,
     req: RefreshRequest | None = None,
     authorization: str = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
+    user_id = None
     if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1]
         try:
-            payload = decode_access_token(token)
-            jti = payload.get("jti")
-            if jti:
-                # Blacklist the access token for the remaining TTL
-                exp = payload.get("exp", 0)
-                ttl = max(int(exp - datetime.now(timezone.utc).timestamp()), 60)
-                await blacklist_token(jti, ttl)
+            user_id = decode_access_token(authorization.split(" ", 1)[1]).get("sub")
         except Exception:
-            pass  # Token might already be expired, that's fine
+            pass
+    await _blacklist_authorization_token(authorization)
 
     if req:
         refresh_hash = hashlib.sha256(req.refresh_token.encode()).hexdigest()
@@ -246,25 +324,53 @@ async def logout(
         if refresh_token and not refresh_token.revoked:
             refresh_token.revoked = True
             refresh_token.revoked_at = datetime.now(timezone.utc)
-            await db.commit()
+            user_id = user_id or refresh_token.user_id
+    if user_id:
+        _add_security_audit(db, "USER_LOGGED_OUT", request, user_id=user_id)
+    await db.commit()
     return MessageResponse(detail="Logged out successfully")
 
 
 @app.post("/api/v1/auth/refresh", response_model=AuthResponse)
-async def refresh(req: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh(req: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await _enforce_auth_rate_limit(
+        request,
+        "refresh",
+        hashlib.sha256(req.refresh_token.encode()).hexdigest(),
+        settings.AUTH_REFRESH_ATTEMPTS_PER_WINDOW,
+    )
     token_hash = hashlib.sha256(req.refresh_token.encode()).hexdigest()
     result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.token_hash == token_hash,
-            RefreshToken.revoked == False,
-        )
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == token_hash)
+        .with_for_update()
     )
     rt = result.scalar_one_or_none()
 
     if not rt:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+    if rt.revoked:
+        now = datetime.now(timezone.utc)
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == rt.user_id, RefreshToken.revoked == False)
+            .values(revoked=True, revoked_at=now)
+        )
+        _add_security_audit(
+            db,
+            "REFRESH_TOKEN_REPLAYED",
+            request,
+            user_id=rt.user_id,
+            details={"response": "all_refresh_sessions_revoked"},
+        )
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
     if rt.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        rt.revoked = True
+        rt.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
     # Get user
@@ -279,13 +385,7 @@ async def refresh(req: RefreshRequest, db: AsyncSession = Depends(get_db)):
 
     # Issue new tokens
     access = create_access_token(user.id, user.email)
-    raw_refresh, new_hash, expires_at = create_refresh_token()
-
-    new_rt = RefreshToken(
-        user_id=user.id,
-        token_hash=new_hash,
-        expires_at=expires_at,
-    )
+    raw_refresh, new_rt = _new_refresh_session(user.id, request)
     db.add(new_rt)
     await db.commit()
 
@@ -321,6 +421,119 @@ async def update_me(
     await db.commit()
     await db.refresh(user)
     return MeResponse(user=_user_response(user))
+
+
+@app.post("/api/v1/auth/change-password", response_model=MessageResponse)
+async def change_password(
+    req: ChangePasswordRequest,
+    request: Request,
+    authorization: str = Header(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not user.password_hash or not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if verify_password(req.new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="New password must be different")
+
+    user.password_hash = hash_password(req.new_password)
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked == False)
+        .values(revoked=True, revoked_at=now)
+    )
+    _add_security_audit(
+        db,
+        "PASSWORD_CHANGED",
+        request,
+        user_id=user.id,
+        details={"refresh_sessions_revoked": True},
+    )
+    await db.commit()
+    await _blacklist_authorization_token(authorization)
+    return MessageResponse(detail="Password changed. Sign in again on all devices.")
+
+
+@app.get("/api/v1/auth/sessions", response_model=List[SessionResponse])
+async def list_sessions(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = await db.execute(
+        select(RefreshToken)
+        .where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked == False,
+            RefreshToken.expires_at > now,
+        )
+        .order_by(RefreshToken.created_at.desc())
+    )
+    return [
+        SessionResponse(
+            id=session.id,
+            ip_address=session.ip_address,
+            user_agent=session.user_agent,
+            created_at=session.created_at,
+            expires_at=session.expires_at,
+        )
+        for session in result.scalars().all()
+    ]
+
+
+@app.delete("/api/v1/auth/sessions/{session_id}", response_model=MessageResponse)
+async def revoke_session(
+    session_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(RefreshToken)
+        .where(RefreshToken.id == session_id, RefreshToken.user_id == user.id)
+        .with_for_update()
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.revoked:
+        session.revoked = True
+        session.revoked_at = datetime.now(timezone.utc)
+        _add_security_audit(
+            db,
+            "SESSION_REVOKED",
+            request,
+            user_id=user.id,
+            details={"session_id": session.id},
+        )
+        await db.commit()
+    return MessageResponse(detail="Session revoked")
+
+
+@app.delete("/api/v1/auth/sessions", response_model=MessageResponse)
+async def revoke_all_sessions(
+    request: Request,
+    authorization: str = Header(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked == False)
+        .values(revoked=True, revoked_at=now)
+    )
+    _add_security_audit(
+        db,
+        "SESSIONS_REVOKED",
+        request,
+        user_id=user.id,
+        details={"revoked_count": result.rowcount or 0},
+    )
+    await db.commit()
+    await _blacklist_authorization_token(authorization)
+    return MessageResponse(detail="All sessions revoked")
 
 # ── Admin Routes ──
 

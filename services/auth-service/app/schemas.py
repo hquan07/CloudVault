@@ -13,7 +13,7 @@ from datetime import datetime
 class RegisterRequest(BaseModel):
     email: EmailStr
     username: str = Field(..., min_length=3, max_length=100)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
 
 
 class LoginRequest(BaseModel):
@@ -28,6 +28,11 @@ class RefreshRequest(BaseModel):
 class UpdateProfileRequest(BaseModel):
     username: Optional[str] = Field(None, min_length=3, max_length=100)
     avatar_url: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 # ── Response Schemas ──
@@ -72,6 +77,14 @@ class MeResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class SessionResponse(BaseModel):
+    id: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
 
 
 class ProjectCreateRequest(BaseModel):

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     INDEX idx_refresh_tokens_user (user_id),
     INDEX idx_refresh_tokens_hash (token_hash),
     INDEX idx_refresh_tokens_expires (expires_at),
+    INDEX idx_refresh_tokens_active (user_id, revoked, expires_at),
     CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id) 
         REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -333,7 +334,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
         'FILE_MOVED', 'FILE_COPIED', 'FILE_SHARED', 'FILE_VERSIONED',
         'FOLDER_CREATED', 'FOLDER_DELETED', 'FOLDER_RENAMED',
         'SHARE_CREATED', 'SHARE_ACCESSED', 'SHARE_REVOKED',
-        'PASSWORD_CHANGED', 'QUOTA_EXCEEDED'
+        'PASSWORD_CHANGED', 'QUOTA_EXCEEDED',
+        'USER_LOGIN_FAILED', 'SESSION_REVOKED', 'SESSIONS_REVOKED',
+        'REFRESH_TOKEN_REPLAYED'
     ) NOT NULL,
     resource_type ENUM('user', 'file', 'folder', 'share') NOT NULL,
     resource_id CHAR(36),

@@ -101,6 +101,8 @@ class AuditLog(Base):
     action = Column(String(50), nullable=False)
     resource_type = Column(String(20), nullable=False)
     resource_id = Column(String(36), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
     details_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 

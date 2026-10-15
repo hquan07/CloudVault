@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Authentication abuse protection. Limits are per client/identity pair.
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, ge=10, le=3600)
+    AUTH_LOGIN_ATTEMPTS_PER_WINDOW: int = Field(default=5, ge=1, le=100)
+    AUTH_REGISTER_ATTEMPTS_PER_WINDOW: int = Field(default=3, ge=1, le=100)
+    AUTH_REFRESH_ATTEMPTS_PER_WINDOW: int = Field(default=20, ge=1, le=500)
+
+    # Browser origins allowed only for direct API development. Production UI
+    # uses same-origin requests through Nginx.
+    CORS_ALLOWED_ORIGINS: str = "http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000"
+
     # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str = "kafka:29092"
     KAFKA_TOPIC_USER_EVENTS: str = "user-events"
@@ -47,6 +57,10 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
 
     class Config:
         env_file = ".env"

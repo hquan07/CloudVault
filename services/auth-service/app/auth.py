@@ -3,6 +3,7 @@ CloudVault — Auth Service JWT & Password Utilities
 """
 
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,13 @@ from app.config import settings
 
 # ── Redis client for token blacklisting ──
 redis_client: aioredis.Redis | None = None
+logger = logging.getLogger(__name__)
+
+
+class RateLimitExceeded(Exception):
+    def __init__(self, retry_after: int):
+        super().__init__("Authentication rate limit exceeded")
+        self.retry_after = max(1, retry_after)
 
 
 async def init_redis():
@@ -88,3 +96,37 @@ async def is_token_blacklisted(jti: str) -> bool:
     if redis_client:
         return bool(await redis_client.get(f"blacklist:{jti}"))
     return False
+
+
+async def enforce_rate_limit(
+    scope: str,
+    identifier: str,
+    *,
+    limit: int,
+    window_seconds: int,
+) -> None:
+    """Apply a fixed-window Redis limit without storing raw identifiers."""
+    if not redis_client:
+        return
+    digest = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
+    key = f"auth-rate:{scope}:{digest}"
+    try:
+        current, ttl = await redis_client.eval(
+            """
+            local current = redis.call('INCR', KEYS[1])
+            if current == 1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return {current, redis.call('TTL', KEYS[1])}
+            """,
+            1,
+            key,
+            window_seconds,
+        )
+    except Exception:
+        # Nginx remains the outer limiter. A Redis outage must not turn into an
+        # authentication outage, and no credential material is logged here.
+        logger.exception("Redis authentication rate limiter is unavailable")
+        return
+    if int(current) > limit:
+        raise RateLimitExceeded(int(ttl) if int(ttl) > 0 else window_seconds)
