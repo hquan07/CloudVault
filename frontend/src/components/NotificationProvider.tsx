@@ -3,6 +3,12 @@ import { useEffect, useState, ReactNode } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { getToken } from '@/lib/api';
 import { Bell, X } from 'lucide-react';
+import {
+    AccountPreferences,
+    applyPreferences,
+    loadPreferences,
+    PREFERENCES_EVENT,
+} from '@/lib/preferences';
 
 interface NotificationData {
     id: string;
@@ -15,9 +21,21 @@ interface NotificationData {
 export function NotificationProvider({ children }: { children: ReactNode }) {
     const { user } = useAuth();
     const [notifications, setNotifications] = useState<NotificationData[]>([]);
+    const [preferences, setPreferences] = useState<AccountPreferences>(() => loadPreferences());
 
     useEffect(() => {
-        if (!user) return;
+        applyPreferences(preferences);
+        const handlePreferences = (event: Event) => {
+            const updated = (event as CustomEvent<AccountPreferences>).detail;
+            setPreferences(updated);
+            applyPreferences(updated);
+        };
+        window.addEventListener(PREFERENCES_EVENT, handlePreferences);
+        return () => window.removeEventListener(PREFERENCES_EVENT, handlePreferences);
+    }, [preferences]);
+
+    useEffect(() => {
+        if (!user || (!preferences.inAppNotifications && !preferences.browserNotifications)) return;
         const token = getToken();
         if (!token) return;
 
@@ -34,27 +52,27 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
             try {
                 const data = JSON.parse(event.data);
                 const id = Math.random().toString(36).substring(7);
-                setNotifications(prev => [...prev, { id, ...data }]);
+                if (preferences.inAppNotifications) {
+                    setNotifications(prev => [...prev, { id, ...data }]);
+                }
                 
                 // Show browser notification if permitted
-                if (typeof window !== 'undefined' && 'Notification' in window) {
-                    if (Notification.permission === 'granted') {
-                        new Notification('CloudVault', { body: data.message });
-                    } else if (Notification.permission !== 'denied') {
-                        Notification.requestPermission();
-                    }
+                if (preferences.browserNotifications && 'Notification' in window && Notification.permission === 'granted') {
+                    new Notification('CloudVault', { body: data.message });
                 }
 
-                setTimeout(() => {
-                    setNotifications(prev => prev.filter(n => n.id !== id));
-                }, 8000);
+                if (preferences.inAppNotifications) {
+                    setTimeout(() => {
+                        setNotifications(prev => prev.filter(n => n.id !== id));
+                    }, 8000);
+                }
             } catch (e) {
                 console.error("WebSocket message error", e);
             }
         };
 
         return () => ws.close();
-    }, [user]);
+    }, [preferences.browserNotifications, preferences.inAppNotifications, user]);
 
     return (
         <>

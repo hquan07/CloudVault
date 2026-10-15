@@ -13,12 +13,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const [showSettings, setShowSettings] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
 
   useEffect(() => {
     if (!loading && !user) {
       router.push('/');
     }
   }, [user, loading, router]);
+
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [user?.avatar_url]);
 
   if (loading || !user) {
     return (
@@ -50,9 +55,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const usagePercent = Math.min(100, (user.storage_used / user.storage_quota) * 100);
 
   return (
-    <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden font-sans">
+    <div className="cloudvault-dashboard flex h-screen bg-gray-950 text-gray-100 overflow-hidden font-sans">
       {/* Sidebar */}
-      <aside className="w-64 bg-gray-900 border-r border-gray-800 flex flex-col hidden md:flex z-20 shadow-xl">
+      <aside className="cloudvault-sidebar w-64 bg-gray-900 border-r border-gray-800 flex flex-col hidden md:flex z-20 shadow-xl">
         <div className="h-16 flex items-center px-6 border-b border-gray-800">
           <div className="flex items-center space-x-2 text-cyan-400">
             <Cloud size={28} />
@@ -103,7 +108,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div className="flex items-center justify-between p-3 bg-gray-800/50 rounded-xl">
             <div className="flex items-center space-x-3 overflow-hidden">
               <div className="w-9 h-9 bg-gradient-to-tr from-cyan-500 to-blue-500 rounded-full flex items-center justify-center text-sm font-bold text-white uppercase flex-shrink-0">
-                {user.username.charAt(0)}
+                {user.avatar_url && !avatarFailed ? (
+                  // User-provided remote URLs cannot use the optimized image allowlist.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={user.avatar_url} alt="" className="h-full w-full rounded-full object-cover" onError={() => setAvatarFailed(true)} />
+                ) : user.username.charAt(0)}
               </div>
               <div className="truncate">
                 <div className="text-sm font-medium truncate">{user.username}</div>
@@ -148,6 +157,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button 
               onClick={() => setShowSettings(true)}
               className="p-2 text-gray-400 hover:bg-gray-800 hover:text-gray-200 rounded-lg transition-colors"
+              title="Account settings"
+              aria-label="Open account settings"
             >
               <Settings size={20} />
             </button>

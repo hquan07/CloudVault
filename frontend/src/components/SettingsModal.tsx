@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   BadgeCheck,
+  BellRing,
   CalendarDays,
   Check,
   CircleCheck,
   Clock3,
+  Database,
+  Download,
   HardDrive,
   KeyRound,
   Loader2,
@@ -14,8 +17,10 @@ import {
   MonitorSmartphone,
   RefreshCw,
   Save,
+  SearchX,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   User as UserIcon,
   X,
@@ -23,12 +28,17 @@ import {
 import { useAuth } from '@/lib/auth-context';
 import { ApiError, AuthSession, SecurityEvent, authApi } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
+import {
+  AccountPreferences,
+  loadPreferences,
+  savePreferences,
+} from '@/lib/preferences';
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-type SettingsSection = 'profile' | 'security' | 'sessions';
+type SettingsSection = 'profile' | 'security' | 'sessions' | 'preferences' | 'privacy';
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
@@ -75,6 +85,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
   const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [preferences, setPreferenceState] = useState<AccountPreferences>(() => loadPreferences());
+  const [notificationPermission, setNotificationPermission] = useState<string>(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+  });
 
   const resetMessages = () => {
     setError('');
@@ -200,10 +215,63 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
+  const updatePreference = (key: keyof AccountPreferences, value: boolean) => {
+    const updated = { ...preferences, [key]: value };
+    setPreferenceState(updated);
+    savePreferences(updated);
+    resetMessages();
+    setSuccess('Preferences saved on this browser.');
+  };
+
+  const toggleBrowserNotifications = async () => {
+    resetMessages();
+    if (!('Notification' in window)) {
+      setError('This browser does not support desktop notifications.');
+      return;
+    }
+    if (!preferences.browserNotifications) {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission !== 'granted') {
+        setError(permission === 'denied'
+          ? 'Desktop notifications are blocked in your browser settings.'
+          : 'Desktop notification permission was not granted.');
+        return;
+      }
+    }
+    updatePreference('browserNotifications', !preferences.browserNotifications);
+  };
+
+  const downloadAccountData = () => {
+    const exported = {
+      exported_at: new Date().toISOString(),
+      profile: user,
+      active_sessions: sessions,
+      recent_security_activity: securityEvents,
+      browser_preferences: preferences,
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cloudvault-account-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    resetMessages();
+    setSuccess('Account information downloaded. File contents exclude passwords and tokens.');
+  };
+
+  const clearRecentSearches = () => {
+    localStorage.removeItem('cloudvault_recent_searches');
+    resetMessages();
+    setSuccess('Recent searches cleared from this browser.');
+  };
+
   const sections: Array<{ id: SettingsSection; label: string; icon: typeof UserIcon }> = [
     { id: 'profile', label: 'Profile', icon: UserIcon },
     { id: 'security', label: 'Security', icon: ShieldCheck },
     { id: 'sessions', label: 'Sessions', icon: MonitorSmartphone },
+    { id: 'preferences', label: 'Preferences', icon: SlidersHorizontal },
+    { id: 'privacy', label: 'Privacy & data', icon: Database },
   ];
 
   const storagePercent = user.storage_quota
@@ -329,6 +397,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-xl font-semibold text-white">Active sessions</h3><p className="mt-1 text-sm text-gray-500">Devices that can renew access to your account.</p></div><div className="flex gap-2"><button type="button" onClick={() => void loadSessions()} disabled={sessionsLoading} className="rounded-xl border border-gray-700 p-2 text-gray-400 hover:border-cyan-500/40 hover:text-cyan-300" aria-label="Refresh sessions"><RefreshCw size={17} className={sessionsLoading ? 'animate-spin' : ''} /></button><button type="button" onClick={revokeAllSessions} disabled={revokingId === 'all' || sessions.length === 0} className="flex items-center gap-2 rounded-xl border border-red-500/30 px-3 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:opacity-40">{revokingId === 'all' ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out all</button></div></div>
                 {sessionsLoading ? <div className="flex justify-center py-14 text-gray-500"><Loader2 className="animate-spin" /></div> : sessions.length === 0 ? <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-8 text-center text-sm text-gray-500">No active refresh sessions.</div> : <div className="space-y-3">{sessions.map((session) => <div key={session.id} className={`flex items-center gap-4 rounded-xl border p-4 ${session.is_current ? 'border-cyan-500/30 bg-cyan-950/15' : 'border-gray-800 bg-gray-950/50'}`}><div className="rounded-xl bg-gray-800 p-2.5 text-cyan-400"><MonitorSmartphone size={20} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="truncate text-sm font-medium text-gray-200">{describeAgent(session.user_agent)}</p>{session.is_current && <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">This device</span>}</div><p className="mt-1 text-xs text-gray-500">IP {session.ip_address || 'unknown'} · Last active {new Date(session.last_active_at).toLocaleString()}</p><p className="mt-1 text-xs text-gray-600">Signed in {new Date(session.session_started_at).toLocaleString()} · Expires {new Date(session.expires_at).toLocaleString()}</p></div><button type="button" onClick={() => void revokeSession(session)} disabled={revokingId === session.id} className="rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300" aria-label={session.is_current ? 'Sign out this device' : 'Revoke session'}>{revokingId === session.id ? <Loader2 size={17} className="animate-spin" /> : session.is_current ? <LogOut size={17} /> : <Trash2 size={17} />}</button></div>)}</div>}
                 <p className="text-xs leading-5 text-gray-600">Revoking a refresh session prevents renewal. An access token already issued from it can remain valid until its short expiry window ends.</p>
+              </div>
+            )}
+
+            {section === 'preferences' && (
+              <div className="mx-auto max-w-2xl space-y-6">
+                <div><h3 className="text-xl font-semibold text-white">Preferences</h3><p className="mt-1 text-sm text-gray-500">These choices are stored locally and apply only to this browser.</p></div>
+
+                <section className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-950/35">
+                  <div className="border-b border-gray-800 p-5"><h4 className="flex items-center gap-2 font-semibold text-white"><BellRing size={18} className="text-cyan-400" />Notifications</h4><p className="mt-1 text-sm text-gray-500">Control how live project and file activity reaches you.</p></div>
+                  <div className="divide-y divide-gray-800">
+                    <div className="flex items-center justify-between gap-5 p-5"><div><p className="text-sm font-medium text-gray-200">In-app activity alerts</p><p className="mt-1 text-xs text-gray-500">Show temporary alerts while CloudVault is open.</p></div><button type="button" role="switch" aria-checked={preferences.inAppNotifications} onClick={() => updatePreference('inAppNotifications', !preferences.inAppNotifications)} className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${preferences.inAppNotifications ? 'bg-cyan-500' : 'bg-gray-700'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${preferences.inAppNotifications ? 'left-6' : 'left-1'}`} /></button></div>
+                    <div className="flex items-center justify-between gap-5 p-5"><div><p className="text-sm font-medium text-gray-200">Desktop notifications</p><p className="mt-1 text-xs text-gray-500">Use browser notifications when permission is granted. Current permission: <span className="text-gray-400">{notificationPermission}</span>.</p></div><button type="button" role="switch" aria-checked={preferences.browserNotifications} onClick={() => void toggleBrowserNotifications()} disabled={notificationPermission === 'unsupported'} className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 ${preferences.browserNotifications ? 'bg-cyan-500' : 'bg-gray-700'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${preferences.browserNotifications ? 'left-6' : 'left-1'}`} /></button></div>
+                  </div>
+                </section>
+
+                <section className="overflow-hidden rounded-2xl border border-gray-800 bg-gray-950/35">
+                  <div className="border-b border-gray-800 p-5"><h4 className="flex items-center gap-2 font-semibold text-white"><SlidersHorizontal size={18} className="text-cyan-400" />Interface</h4><p className="mt-1 text-sm text-gray-500">Adjust density and motion without changing project data.</p></div>
+                  <div className="divide-y divide-gray-800">
+                    <div className="flex items-center justify-between gap-5 p-5"><div><p className="text-sm font-medium text-gray-200">Compact navigation</p><p className="mt-1 text-xs text-gray-500">Reduce spacing between sidebar destinations.</p></div><button type="button" role="switch" aria-checked={preferences.compactNavigation} onClick={() => updatePreference('compactNavigation', !preferences.compactNavigation)} className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${preferences.compactNavigation ? 'bg-cyan-500' : 'bg-gray-700'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${preferences.compactNavigation ? 'left-6' : 'left-1'}`} /></button></div>
+                    <div className="flex items-center justify-between gap-5 p-5"><div><p className="text-sm font-medium text-gray-200">Reduce motion</p><p className="mt-1 text-xs text-gray-500">Minimize animations and transitions for accessibility.</p></div><button type="button" role="switch" aria-checked={preferences.reduceMotion} onClick={() => updatePreference('reduceMotion', !preferences.reduceMotion)} className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${preferences.reduceMotion ? 'bg-cyan-500' : 'bg-gray-700'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${preferences.reduceMotion ? 'left-6' : 'left-1'}`} /></button></div>
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {section === 'privacy' && (
+              <div className="mx-auto max-w-2xl space-y-6">
+                <div><h3 className="text-xl font-semibold text-white">Privacy & data</h3><p className="mt-1 text-sm text-gray-500">Review portable account information and browser-local data.</p></div>
+                <div className="rounded-2xl border border-gray-800 bg-gray-950/35 p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h4 className="flex items-center gap-2 font-semibold text-white"><Download size={18} className="text-cyan-400" />Download account information</h4><p className="mt-1 max-w-lg text-sm text-gray-500">Export your profile, active-session metadata, recent security activity and browser preferences as JSON. Passwords and tokens are never included.</p></div><button type="button" onClick={downloadAccountData} className="shrink-0 rounded-xl border border-cyan-500/30 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10">Download JSON</button></div></div>
+                <div className="rounded-2xl border border-gray-800 bg-gray-950/35 p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h4 className="flex items-center gap-2 font-semibold text-white"><SearchX size={18} className="text-cyan-400" />Recent searches</h4><p className="mt-1 max-w-lg text-sm text-gray-500">Search history is stored only in this browser and is not part of project audit logs.</p></div><button type="button" onClick={clearRecentSearches} className="shrink-0 rounded-xl border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-cyan-500/30 hover:text-cyan-300">Clear history</button></div></div>
+                <div className="rounded-2xl border border-red-500/20 bg-red-950/10 p-5"><h4 className="font-semibold text-red-200">Account access</h4><p className="mt-1 text-sm text-gray-500">Immediately revoke every refresh session, including this browser. Existing access tokens are blacklisted for this request and otherwise expire within their short lifetime.</p><button type="button" onClick={revokeAllSessions} disabled={revokingId === 'all'} className="mt-4 flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:opacity-50">{revokingId === 'all' ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out all devices</button></div>
               </div>
             )}
           </main>
