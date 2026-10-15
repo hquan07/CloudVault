@@ -49,6 +49,7 @@ from app.models import (
     User, File, Folder, FileVersion, SharedLink, AuditLog, AnalyticsDaily,
     FolderPermission, Project, ProjectFileStar, ProjectMembership,
 )
+from app.analytics import build_storage_growth, build_upload_activity, summarize_file_types
 
 # ── Elasticsearch & Redis clients ──
 es_client: AsyncElasticsearch | None = None
@@ -521,6 +522,102 @@ async def get_storage(
         "storage_used": used,
         "storage_quota": user.storage_quota,
         "percentage": round((used / user.storage_quota * 100), 2) if user.storage_quota > 0 else 0,
+    }
+
+
+# ══════════════════════════════════════════════
+# USER-SCOPED ANALYTICS
+# ══════════════════════════════════════════════
+
+@app.get("/api/v1/analytics/stats")
+async def get_analytics_stats(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if user.role == "admin":
+        project_ids = select(Project.id)
+    else:
+        project_ids = select(ProjectMembership.project_id).where(
+            ProjectMembership.user_id == user.id
+        )
+    access_filter = or_(
+        and_(File.user_id == user.id, File.project_id.is_(None)),
+        File.project_id.in_(project_ids),
+    )
+    active_filter = and_(access_filter, File.is_deleted.is_(False))
+
+    project_count = await db.scalar(select(func.count()).select_from(project_ids.subquery())) or 0
+    total_storage = await db.scalar(
+        select(func.coalesce(func.sum(File.size), 0)).where(access_filter)
+    ) or 0
+    trash_bytes = await db.scalar(
+        select(func.coalesce(func.sum(File.size), 0)).where(
+            access_filter, File.is_deleted.is_(True)
+        )
+    ) or 0
+    active_files = await db.scalar(
+        select(func.count(File.id)).where(active_filter)
+    ) or 0
+
+    project_starred_ids = select(ProjectFileStar.file_id).where(
+        ProjectFileStar.user_id == user.id
+    )
+    starred_files = await db.scalar(
+        select(func.count(File.id)).where(
+            active_filter,
+            or_(
+                and_(File.project_id.is_(None), File.is_starred.is_(True)),
+                File.id.in_(project_starred_ids),
+            ),
+        )
+    ) or 0
+    active_shares = await db.scalar(
+        select(func.count(func.distinct(SharedLink.id)))
+        .select_from(SharedLink)
+        .join(File, File.id == SharedLink.file_id)
+        .where(
+            active_filter,
+            SharedLink.is_active.is_(True),
+            or_(SharedLink.expires_at.is_(None), SharedLink.expires_at > now),
+        )
+    ) or 0
+
+    file_type_result = await db.execute(
+        select(File.mime_type, func.count(File.id))
+        .where(active_filter)
+        .group_by(File.mime_type)
+    )
+    hour_expression = func.date_format(File.created_at, "%Y-%m-%d %H:00:00")
+    hourly_result = await db.execute(
+        select(hour_expression, func.count(File.id))
+        .where(active_filter, File.created_at >= now - timedelta(hours=24))
+        .group_by(hour_expression)
+        .order_by(hour_expression)
+    )
+    day_expression = func.date(File.created_at)
+    daily_result = await db.execute(
+        select(day_expression, func.coalesce(func.sum(File.size), 0))
+        .where(access_filter, File.created_at >= now - timedelta(days=6))
+        .group_by(day_expression)
+        .order_by(day_expression)
+    )
+
+    return {
+        "generated_at": now.replace(tzinfo=timezone.utc).isoformat(),
+        "scope": {"personal": True, "project_count": int(project_count)},
+        "cards": {
+            "total_storage_bytes": int(total_storage),
+            "active_files": int(active_files),
+            "starred_files": int(starred_files),
+            "active_shares": int(active_shares),
+            "trash_bytes": int(trash_bytes),
+        },
+        "file_types": summarize_file_types(file_type_result.all()),
+        "upload_activity": build_upload_activity(hourly_result.all(), now),
+        "storage_growth": build_storage_growth(
+            int(total_storage), daily_result.all(), now.date()
+        ),
     }
 
 

@@ -422,6 +422,21 @@ export interface AuditActivity {
   created_at: string;
 }
 
+export interface AnalyticsStats {
+  generated_at: string;
+  scope: { personal: boolean; project_count: number };
+  cards: {
+    total_storage_bytes: number;
+    active_files: number;
+    starred_files: number;
+    active_shares: number;
+    trash_bytes: number;
+  };
+  file_types: { name: string; value: number; color: string }[];
+  upload_activity: { time: string; uploads: number }[];
+  storage_growth: { day: string; date: string; storage_bytes: number }[];
+}
+
 export interface ProjectMember {
   id: string;
   project_id: string;
@@ -818,6 +833,8 @@ export const metaApi = {
     request(`${META_BASE}/metadata/files/${fileId}/versions`),
 
   getStorage: () => request(`${META_BASE}/metadata/storage`),
+
+  getAnalytics: () => request<AnalyticsStats>(`${META_BASE}/analytics/stats`),
 
   search: (params: {
     q: string; page?: number; pageSize?: number; mimeType?: string;

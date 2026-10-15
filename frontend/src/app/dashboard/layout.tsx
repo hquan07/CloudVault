@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, FolderKanban, X } from 'lucide-react';
+import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, FolderKanban, X, BarChart3 } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
 
@@ -64,6 +64,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { name: 'Recent', path: '/dashboard/recent', icon: Clock },
     { name: 'Starred', path: '/dashboard/starred', icon: Star },
     { name: 'Activity Log', path: '/dashboard/activity', icon: Activity },
+    { name: 'Analytics', path: '/dashboard/analytics', icon: BarChart3 },
     { name: 'Trash', path: '/dashboard/trash', icon: Trash2 },
   ];
 
