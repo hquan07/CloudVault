@@ -30,6 +30,8 @@ and an operations plane for quota and object-integrity monitoring.
   and privacy exports. Account deletion uses impact checks, project ownership
   transfer, a seven-day cancellation window and asynchronous object cleanup.
 - Full-text search through authenticated Elasticsearch.
+- Responsive dashboard navigation and live, user-scoped storage analytics; the
+  UI never substitutes demonstration values when analytics is unavailable.
 - In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
 - Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events
   and real-time Redis/WebSocket notifications.
@@ -45,6 +47,10 @@ and an operations plane for quota and object-integrity monitoring.
   reservation.
 - Project folders, filters, per-user stars, bulk actions, preview, trash,
   archive/restore and audited lifecycle controls are available in the UI.
+- Each project provides its own `Integrations` and `Health / Operations` tabs;
+  multi-file/folder upload queues expose aggregate progress, retry and cancel.
+- Global search switches explicitly between personal storage and one accessible
+  project, preserving that scope in the URL.
 - E-commerce, News_Flow and Real-Time Stock clients connect through the shared
   gateway network without receiving direct MySQL or MinIO credentials.
 
@@ -222,7 +228,7 @@ bind to loopback; persistence and messaging services stay Docker-internal.
 | Next.js Frontend | `3000` | Loopback (`APP_BIND_ADDRESS`) | Direct frontend debugging |
 | Auth Service | `8001` | Loopback (`APP_BIND_ADDRESS`) | Users, projects, members and service accounts |
 | File Service | `8002` | Loopback (`APP_BIND_ADDRESS`) | Personal/project file and folder operations |
-| Metadata Service | `8003` | Loopback (`APP_BIND_ADDRESS`) | Sharing, search, activity and WebSocket API |
+| Metadata Service | `8003` | Loopback (`APP_BIND_ADDRESS`) | Sharing, scoped analytics, search, activity and WebSocket API |
 | MinIO API / Console | `9000` / `9001` | Loopback (`INFRA_BIND_ADDRESS`) | Object storage and administration |
 | Kibana | `5601` | Loopback (`INFRA_BIND_ADDRESS`) | Search administration |
 | Kafka UI | `8080` | Loopback (`INFRA_BIND_ADDRESS`) | Kafka administration |

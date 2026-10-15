@@ -154,11 +154,27 @@ operators must back up and plan object migration before enabling the overlay.
 | Nginx | Host entry point, UI/API/WebSocket routing, request limits and project route dispatch |
 | Auth Service | Users, JWT lifecycle, admin APIs, projects, membership, project policy, project lifecycle and service accounts |
 | File Service | Personal/project folders and files, streamed object I/O, versions, idempotency, quota reservation, trash and project operation status |
-| Metadata Service | Metadata views, sharing, activity, Elasticsearch queries and authenticated WebSocket delivery |
+| Metadata Service | Metadata views, sharing, user-scoped analytics, activity, Elasticsearch queries and authenticated WebSocket delivery |
 
 Project routes are intentionally split. Nginx sends project lifecycle,
 membership and service-account requests to Auth Service, while project file,
 folder, usage and operation-status requests go to File Service.
+
+### Frontend scope and analytics
+
+- Dashboard navigation uses the same destination list on desktop and in the
+  accessible mobile drawer. `Integrations` and `Health / Operations` remain
+  nested in project detail because their credentials, quota and reconciliation
+  state belong to exactly one project boundary.
+- The Analytics page calls `GET /api/v1/analytics/stats` through Nginx. Metadata
+  Service combines the caller's personal files with only projects visible to
+  that caller; a system administrator can inspect all project storage.
+- Analytics summary cards and charts are computed from MySQL file/share/star
+  state. API failure produces an explicit unavailable or stale-snapshot state,
+  never fallback demonstration data.
+- Global search accepts a single `project_id`. Metadata Service verifies the
+  project and membership before querying Elasticsearch or the MySQL fallback;
+  omitting the parameter searches personal files only.
 
 ## 3. Identity and Authorization
 
