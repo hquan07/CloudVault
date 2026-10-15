@@ -26,6 +26,7 @@ x-zookeeper-environment: &zookeeper-environment
   KAFKA_HEAP_OPTS: ${ZOOKEEPER_HEAP_OPTS:--Xms128m -Xmx256m}
 
 x-minio-environment: &minio-environment
+  CLOUDVAULT_HA_MODE_ACK: ${CLOUDVAULT_HA_MODE_ACK:?Set CLOUDVAULT_HA_MODE_ACK only after backup and standalone-to-distributed migration planning}
   MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
   MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
   MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000}

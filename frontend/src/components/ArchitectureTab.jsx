@@ -40,21 +40,21 @@ const nodeDetails = {
   file_preview: { desc: 'Preview Component', stat: 'Media · PDF · text · JSON · XML · CSV' },
   notifications: { desc: 'Notification UI', stat: 'Authenticated WebSocket activity' },
   api_client: { desc: 'Same-origin API client', stat: 'JWT refresh · project requests · retry' },
-  auth: { desc: 'FastAPI Auth Service', stat: 'Users · projects · membership · service accounts' },
-  files: { desc: 'FastAPI File Service', stat: 'Streaming · idempotency · quota reservation' },
-  metadata: { desc: 'FastAPI Metadata Service', stat: 'Sharing · search · activity · WebSocket' },
+  auth: { desc: 'FastAPI Auth replica group', stat: 'Users · projects · membership · service accounts' },
+  files: { desc: 'FastAPI File replica group', stat: 'Streaming · idempotency · quota reservation' },
+  metadata: { desc: 'FastAPI Metadata replica group', stat: 'Sharing · search · activity · WebSocket' },
   mysql: { desc: 'MySQL 8', stat: 'Personal/project metadata and audit' },
-  minio: { desc: 'MinIO object storage', stat: 'Files · versions · thumbnails · avatars' },
-  kafka: { desc: 'Apache Kafka', stat: 'Internal file-events and user-events topics' },
+  minio: { desc: 'MinIO object storage', stat: 'Development: 1 node · HA: 4 distributed nodes' },
+  kafka: { desc: 'Apache Kafka', stat: 'Development: 1 broker · HA: 3 brokers, RF=3' },
   redis: { desc: 'Redis 7', stat: 'JWT revocation · Pub/Sub' },
   elasticsearch: { desc: 'Elasticsearch 8.11', stat: 'Authenticated least-privilege search' },
-  audit_worker: { desc: 'Audit Logger', stat: 'Kafka events → MySQL audit trail' },
-  zip_worker: { desc: 'Guarded ZIP Extractor', stat: 'Quota and archive safety limits' },
-  thumbnail_worker: { desc: 'Thumbnail Worker', stat: 'MinIO derivatives · notifications' },
-  search_worker: { desc: 'Search Indexer', stat: 'MinIO content → Elasticsearch' },
-  notification_relay: { desc: 'Notification Relay', stat: 'metadata-notifications consumer group' },
+  audit_worker: { desc: 'Scalable Audit Logger group', stat: 'Manual commit · retry · DLQ · event dedupe' },
+  zip_worker: { desc: 'Scalable guarded ZIP group', stat: 'Archive limits · retry · DLQ · event dedupe' },
+  thumbnail_worker: { desc: 'Scalable Thumbnail group', stat: 'Manual commit · retry · dead-letter topic' },
+  search_worker: { desc: 'Scalable Search Indexer group', stat: 'Manual commit · retry · dead-letter topic' },
+  notification_relay: { desc: 'Notification Relay consumer group', stat: 'Manual commit · retry · dead-letter topic' },
   project_ops: { desc: 'Project Operations', stat: 'Reconciliation · retention · metrics :9100' },
-  mysql_migrate: { desc: 'One-shot migration job', stat: 'Ordered idempotent migrations 002–008' },
+  mysql_migrate: { desc: 'One-shot migration job', stat: 'Ordered idempotent migrations 002–010' },
   prometheus: { desc: 'Prometheus', stat: 'Project quota and integrity metrics' },
   grafana: { desc: 'Grafana', stat: 'Project operations dashboard' },
   alertmanager: { desc: 'Alertmanager', stat: 'Quota · drift · object and worker alerts' },
@@ -175,23 +175,23 @@ const initialNodes = [
   { id: 'api_client', type: 'custom', position: { x: 660, y: 270 }, data: { label: 'API Client', sublabel: 'Same-Origin Requests', icon: 'activity', color: '#3b82f6' } },
 
   // API services
-  { id: 'auth', type: 'custom', position: { x: 180, y: 550 }, data: { label: 'Auth Service', sublabel: 'Users + Projects + Access', icon: 'shield', color: '#f59e0b' } },
-  { id: 'files', type: 'custom', position: { x: 470, y: 550 }, data: { label: 'File Service', sublabel: 'Personal + Project I/O', icon: 'folder', color: '#f59e0b' } },
-  { id: 'metadata', type: 'custom', position: { x: 760, y: 550 }, data: { label: 'Metadata Service', sublabel: 'Search + Share + WebSocket', icon: 'server', color: '#f59e0b' } },
+  { id: 'auth', type: 'custom', position: { x: 180, y: 550 }, data: { label: 'Auth Service', sublabel: 'Stateless Replica Group', icon: 'shield', color: '#f59e0b' } },
+  { id: 'files', type: 'custom', position: { x: 470, y: 550 }, data: { label: 'File Service', sublabel: 'Stateless Replica Group', icon: 'folder', color: '#f59e0b' } },
+  { id: 'metadata', type: 'custom', position: { x: 760, y: 550 }, data: { label: 'Metadata Service', sublabel: 'Stateless Replica Group', icon: 'server', color: '#f59e0b' } },
 
   // Data and messaging
   { id: 'mysql', type: 'custom', position: { x: 0, y: 710 }, data: { label: 'MySQL', sublabel: 'Relational Metadata', icon: 'database', color: '#ef4444' } },
-  { id: 'minio', type: 'custom', position: { x: 220, y: 710 }, data: { label: 'MinIO', sublabel: 'Object + Version Storage', icon: 'database', color: '#ef4444' } },
-  { id: 'kafka', type: 'custom', position: { x: 440, y: 710 }, data: { label: 'Kafka', sublabel: 'Internal Event Bus', icon: 'zap', color: '#ef4444' } },
+  { id: 'minio', type: 'custom', position: { x: 220, y: 710 }, data: { label: 'MinIO', sublabel: '1 Dev / 4 HA Nodes', icon: 'database', color: '#ef4444' } },
+  { id: 'kafka', type: 'custom', position: { x: 440, y: 710 }, data: { label: 'Kafka', sublabel: '1 Dev / 3 HA Brokers', icon: 'zap', color: '#ef4444' } },
   { id: 'redis', type: 'custom', position: { x: 660, y: 710 }, data: { label: 'Redis', sublabel: 'Revocation + Pub/Sub', icon: 'database', color: '#ef4444' } },
   { id: 'elasticsearch', type: 'custom', position: { x: 880, y: 710 }, data: { label: 'Elasticsearch', sublabel: 'Authenticated Search', icon: 'search', color: '#ef4444' } },
   { id: 'jaeger', type: 'custom', position: { x: 1100, y: 550 }, data: { label: 'Jaeger', sublabel: 'OpenTelemetry Traces', icon: 'search', color: '#06b6d4' } },
 
   // Workers
-  { id: 'audit_worker', type: 'custom', position: { x: 0, y: 880 }, data: { label: 'Audit Logger', sublabel: 'Kafka Consumer', icon: 'terminal', color: '#10b981' } },
-  { id: 'zip_worker', type: 'custom', position: { x: 220, y: 880 }, data: { label: 'ZIP Extractor', sublabel: 'Guarded Worker', icon: 'archive', color: '#10b981' } },
-  { id: 'thumbnail_worker', type: 'custom', position: { x: 440, y: 880 }, data: { label: 'Thumbnail Worker', sublabel: 'Image Derivatives', icon: 'image', color: '#10b981' } },
-  { id: 'search_worker', type: 'custom', position: { x: 660, y: 880 }, data: { label: 'Search Indexer', sublabel: 'Content Indexing', icon: 'search', color: '#10b981' } },
+  { id: 'audit_worker', type: 'custom', position: { x: 0, y: 880 }, data: { label: 'Audit Logger', sublabel: 'Scalable Consumer Group', icon: 'terminal', color: '#10b981' } },
+  { id: 'zip_worker', type: 'custom', position: { x: 220, y: 880 }, data: { label: 'ZIP Extractor', sublabel: 'Scalable Guarded Group', icon: 'archive', color: '#10b981' } },
+  { id: 'thumbnail_worker', type: 'custom', position: { x: 440, y: 880 }, data: { label: 'Thumbnail Worker', sublabel: 'Scalable Consumer Group', icon: 'image', color: '#10b981' } },
+  { id: 'search_worker', type: 'custom', position: { x: 660, y: 880 }, data: { label: 'Search Indexer', sublabel: 'Scalable Consumer Group', icon: 'search', color: '#10b981' } },
   { id: 'notification_relay', type: 'custom', position: { x: 880, y: 880 }, data: { label: 'Notification Relay', sublabel: 'Kafka → Redis', icon: 'bell', color: '#10b981' } },
   { id: 'project_ops', type: 'custom', position: { x: 1100, y: 880 }, data: { label: 'Project Operations', sublabel: 'Reconcile + Retention', icon: 'activity', color: '#10b981' } },
 
@@ -275,7 +275,7 @@ const initialEdges = [
   { id: 'e-relay-redis', source: 'notification_relay', target: 'redis', label: 'publish activity', ...defaultEdgeOptions, style: { ...greenLine, ...dashedLine }, type: 'smoothstep' },
 
   // Operations, migrations and observability
-  { id: 'e-migrate-mysql', source: 'mysql_migrate', target: 'mysql', label: 'migrations 002–008', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
+  { id: 'e-migrate-mysql', source: 'mysql_migrate', target: 'mysql', label: 'migrations 002–010', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
   { id: 'e-ops-mysql', source: 'project_ops', target: 'mysql', label: 'reconcile metadata', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-ops-minio', source: 'project_ops', target: 'minio', label: 'reconcile objects', ...defaultEdgeOptions, style: greenLine, type: 'smoothstep' },
   { id: 'e-prom-ops', source: 'prometheus', target: 'project_ops', label: 'scrape :9100', ...defaultEdgeOptions, style: cyanLine, type: 'smoothstep' },
@@ -346,6 +346,10 @@ export default function ArchitectureTab() {
             Live probes cover Auth, File and Metadata APIs only.
             {lastChecked && <> Last checked {lastChecked.toLocaleTimeString()}.</>}
           </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+            <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300">Development: single-node data services</span>
+            <span className="rounded-full border border-cyan-800/80 bg-cyan-950/30 px-2.5 py-1 text-cyan-300">HA: Kafka ×3 · MinIO ×4 · scalable workloads</span>
+          </div>
         </div>
 
         <div className="rounded-2xl border border-slate-700/80 bg-slate-900/75 p-4 shadow-lg shadow-black/20">

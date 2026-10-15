@@ -124,6 +124,29 @@ flowchart TD
     Meta --> Jaeger
 ```
 
+### Deployment profiles and failure boundaries
+
+The default Compose profile favors local development and runs one Kafka broker,
+one standalone MinIO node and one replica per application workload. The
+optional `docker-compose.ha.yml` overlay keeps the same routes and trust
+boundaries while providing:
+
+- three ZooKeeper nodes and three Kafka brokers, topic replication factor 3,
+  `min.insync.replicas=2` and disabled unclean leader election;
+- four MinIO nodes/drives using erasure coding and HA-only volumes;
+- multiple stateless frontend/API replicas behind the existing Nginx service;
+- multiple instances of each Kafka worker within its existing consumer group;
+  and
+- per-replica database-pool limits so the aggregate remains operator-controlled.
+
+Migration, bucket initialization and Project Operations remain singleton jobs.
+MySQL, Redis and Elasticsearch are not made highly available by this overlay,
+and Nginx remains a single gateway. The profile therefore removes important
+Kafka, object-storage and worker bottlenecks but is not a complete multi-host
+production control plane. The mandatory `CLOUDVAULT_HA_MODE_ACK` guard exists
+because standalone and distributed MinIO use incompatible storage layouts;
+operators must back up and plan object migration before enabling the overlay.
+
 ### API ownership
 
 | Component | Primary responsibilities |
@@ -231,15 +254,23 @@ routes, and Nginx selects the backend service.
 
 ### Kafka event flow
 
-1. File Service publishes supported `file-events`. The `user-events` topic is
-   provisioned for compatible event producers, but current project lifecycle
-   audit writes do not depend on it.
+1. File Service publishes versioned events with a stable event ID and ordering
+   key. Its producer enables idempotence and waits for all in-sync replicas.
+   The `user-events` topic is provisioned for compatible event producers, but
+   current project lifecycle audit writes do not depend on it.
 2. Audit Logger, ZIP Extractor, Thumbnail Worker and Search Indexer use separate
    consumer groups so each can process the same event independently.
 3. Notification Relay runs inside Metadata Service with the
    `metadata-notifications` consumer group and publishes user activity to Redis.
 4. Metadata Service subscribes to the per-user Redis channel and pushes events
    over WebSocket.
+
+Consumers disable automatic offset commits. A message is committed only after
+its side effect succeeds; failures use bounded retry/backoff and then publish
+the original context to `dead-letter-events` so the partition can continue.
+Audit and ZIP processing persist event IDs to make redelivery idempotent.
+Kafka still provides at-least-once delivery: every new consumer must make its
+own external side effects idempotent before it is scaled horizontally.
 
 Audit ownership is split deliberately:
 
@@ -305,8 +336,9 @@ Operational scripts live in `scripts/operations/`:
 The MySQL image runs the baseline schema for a new volume. The one-shot
 `mysql-migrate` service waits for MySQL health and applies ordered, idempotent
 migrations before API services start. Project migrations add project ownership,
-service accounts, audit context, folders, per-user stars/pins and project
-operation status without changing existing personal ownership.
+service accounts, audit context, folders, per-user stars/pins, project operation
+status and event-delivery deduplication without changing existing personal
+ownership. Migrations `002` through `010` are applied in order.
 
 Database and object storage must be backed up together. Restoring only MySQL or
 only MinIO can leave valid metadata without objects, or objects without a

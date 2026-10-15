@@ -52,6 +52,9 @@ and an operations plane for quota and object-integrity monitoring.
 - OpenTelemetry traces from the API services are exported to Jaeger.
 - Backup, verification, restore-drill and selective project-recovery scripts are
   provided under `scripts/operations/`.
+- An optional HA overlay provides three Kafka brokers, four distributed MinIO
+  nodes and horizontally scaled API/worker replicas without changing the
+  lightweight development profile.
 
 ---
 
@@ -164,6 +167,35 @@ docker compose ps
 Access the application through Nginx at [http://localhost](http://localhost).
 The direct frontend port `3000` is bound to loopback for local debugging.
 
+### High-availability profile
+
+The default `docker-compose.yml` remains the development profile: one Kafka
+broker, one standalone MinIO node and one instance of each application service.
+For capacity and single-node failure testing, `docker-compose.ha.yml` adds:
+
+- a three-node ZooKeeper ensemble and three Kafka brokers with replication
+  factor 3, `min.insync.replicas=2` and unclean leader election disabled;
+- four distributed MinIO nodes on dedicated volumes;
+- configurable replicas for the frontend, APIs and Kafka workers; and
+- bounded Kafka retries, manual offset commits, idempotent side effects and a
+  dead-letter topic for poison events.
+
+Distributed MinIO cannot reuse the standalone `minio-data` volume. Back up and
+verify the existing MySQL/MinIO data, plan a controlled object migration, then
+explicitly acknowledge the mode change:
+
+```bash
+export CLOUDVAULT_HA_MODE_ACK=backup-and-migration-reviewed
+docker compose -f docker-compose.yml -f docker-compose.ha.yml config -q
+docker compose -f docker-compose.yml -f docker-compose.ha.yml up -d --build
+./scripts/operations/validate-ha.sh
+```
+
+Do not switch between standalone and distributed MinIO against the same data
+volume. The overlay improves process and disk failure tolerance on one Docker
+host; multi-host production resilience still requires an orchestrator,
+independent hosts and external backup/restore procedures.
+
 ### Run the frontend locally
 
 ```bash
@@ -255,6 +287,19 @@ curl -fsS http://localhost/health/file
 curl -fsS http://localhost/health/metadata
 docker compose ps
 ```
+
+To exercise concurrent project uploads with unique idempotency keys, required
+metadata and checksums, use a temporary project or remove the generated test
+files afterwards:
+
+```bash
+export CLOUDVAULT_PROJECT_TOKEN='cvp_...'
+python3 scripts/load/concurrent_project_upload.py \
+  --project PROJECT_SLUG --requests 20 --workers 8
+```
+
+Add `--allow-quota-rejections` only when intentionally testing a near-full
+project and treating HTTP 413 as an expected hard-quota response.
 
 ---
 
