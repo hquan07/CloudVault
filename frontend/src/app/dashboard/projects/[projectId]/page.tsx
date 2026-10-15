@@ -485,7 +485,7 @@ export default function ProjectDetailPage() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'files', label: 'Files' }, { id: 'trash', label: `Trash${trash.length ? ` (${trash.length})` : ''}` },
     { id: 'members', label: 'Members' }, { id: 'activity', label: 'Activity' },
-    { id: 'operations', label: 'Operations' }, { id: 'policy', label: 'Settings' },
+    { id: 'operations', label: 'Health / Operations' }, { id: 'policy', label: 'Settings' },
     ...(isAdmin ? [{ id: 'integrations' as Tab, label: 'Integrations' }] : []),
   ];
 
@@ -557,8 +557,10 @@ export default function ProjectDetailPage() {
         </div>
       )}
 
-      <div className="flex gap-2 overflow-x-auto border-b border-gray-800">
-        {tabs.map((item) => <button key={item.id} onClick={() => setTab(item.id)} className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm ${tab === item.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-gray-400 hover:text-white'}`}>{item.label}</button>)}
+      <div className="overflow-x-auto border-b border-gray-800" role="tablist" aria-label="Project sections">
+        <div className="flex min-w-max gap-1">
+          {tabs.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)} className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-3 text-sm ${tab === item.id ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-gray-400 hover:text-white'}`}>{item.label}</button>)}
+        </div>
       </div>
 
       {tab === 'files' && (
