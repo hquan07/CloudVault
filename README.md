@@ -25,8 +25,9 @@ and an operations plane for quota and object-integrity monitoring.
 - Personal folders, starred files, trash, sharing links and storage quota.
 - JWT access/refresh tokens, atomic refresh rotation, replay detection and
   Redis-backed revocation.
-- Account security settings for password changes and per-device refresh-session
-  review/revocation.
+- Account Settings for profile/avatar, TOTP MFA with one-time recovery codes,
+  recent security activity, per-device session revocation, browser preferences
+  and privacy exports.
 - Full-text search through authenticated Elasticsearch.
 - In-app preview for images, video, audio, PDF, text, JSON, XML and CSV.
 - Kafka workers for thumbnails, indexing, guarded ZIP extraction, audit events

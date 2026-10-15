@@ -165,16 +165,18 @@ folder, usage and operation-status requests go to File Service.
 ### Browser users
 
 1. Auth Service verifies credentials against MySQL.
-2. It issues a short-lived access JWT and a refresh token whose hash is stored in
-   MySQL together with the client IP and user agent.
+2. It issues a short-lived access JWT carrying the logical session ID and a
+   refresh token whose hash is stored in MySQL together with client IP, user
+   agent, session start and last-renewal timestamps.
 3. Refresh tokens rotate atomically under a row lock. Reuse of an already
    revoked refresh token is treated as replay and revokes all remaining refresh
    sessions for that user.
 4. Logout revokes the current refresh token and stores the access-token `jti` in
    Redis for its remaining lifetime. Password changes revoke every refresh
    session and blacklist the current access token.
-5. Users can inspect active refresh sessions and revoke one or all of them from
-   Account Settings.
+5. Users can inspect recent security events, identify the current device and
+   revoke one or all refresh sessions from Account Settings. Revoking the
+   current session also blacklists its access-token `jti` immediately.
 6. Auth, File and Metadata services reject non-access JWTs, blacklisted tokens
    and inactive users.
 7. Project access additionally requires system-admin status or project
@@ -186,6 +188,13 @@ Auth Service applies configurable Redis-backed limits per client/identity pair.
 The application limiter fails open if Redis is unavailable so the gateway
 remains the outer protection. Login, logout, refresh replay, password and
 session-revocation actions are written to the security audit trail.
+
+Optional TOTP MFA is activated only after the user proves the current password
+and verifies a code from an authenticator application. Authenticator secrets
+are encrypted at rest; recovery codes are returned once and stored only as
+hashes. Disabling MFA revokes all refresh sessions and blacklists the current
+access token. Account preferences are browser-local and never change project
+authorization or retention policy.
 
 ### Project applications
 
@@ -355,9 +364,9 @@ The MySQL image runs the baseline schema for a new volume. The one-shot
 `mysql-migrate` service waits for MySQL health and applies ordered, idempotent
 migrations before API services start. Project migrations add project ownership,
 service accounts, audit context, folders, per-user stars/pins, project operation
-status, event-delivery deduplication and refresh-session security metadata
-without changing existing personal ownership. Migrations `002` through `011`
-are applied in order.
+status, event-delivery deduplication, refresh-session activity metadata and TOTP
+MFA state without changing existing personal ownership. Migrations `002`
+through `013` are applied in order.
 
 Database and object storage must be backed up together. Restoring only MySQL or
 only MinIO can leave valid metadata without objects, or objects without a

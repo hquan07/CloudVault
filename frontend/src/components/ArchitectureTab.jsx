@@ -37,7 +37,7 @@ const nodeDetails = {
   nginx: { desc: 'Nginx Gateway', stat: 'Routing · rate limits · security headers' },
   web: { desc: 'Next.js 16 frontend', stat: 'Personal and project storage UI' },
   projects_ui: { desc: 'Projects UI', stat: 'Files · members · access · policy · activity' },
-  account_security: { desc: 'Account Security UI', stat: 'Password · active sessions · revocation' },
+  account_security: { desc: 'Account Settings UI', stat: 'Profile · MFA · sessions · preferences' },
   file_preview: { desc: 'Preview Component', stat: 'Media · PDF · text · JSON · XML · CSV' },
   notifications: { desc: 'Notification UI', stat: 'Authenticated WebSocket activity' },
   api_client: { desc: 'Same-origin API client', stat: 'JWT refresh · project requests · retry' },
@@ -173,7 +173,7 @@ const initialNodes = [
   { id: 'projects_ui', type: 'custom', position: { x: 0, y: 400 }, data: { label: 'Projects UI', sublabel: 'Storage / Access / Policy', icon: 'folder', color: '#3b82f6' } },
   { id: 'file_preview', type: 'custom', position: { x: 220, y: 400 }, data: { label: 'File Preview', sublabel: 'Personal + Project Files', icon: 'filetext', color: '#3b82f6' } },
   { id: 'notifications', type: 'custom', position: { x: 440, y: 400 }, data: { label: 'Notifications', sublabel: 'WebSocket UI', icon: 'bell', color: '#3b82f6' } },
-  { id: 'account_security', type: 'custom', position: { x: 660, y: 400 }, data: { label: 'Account Security', sublabel: 'Password + Sessions', icon: 'lock', color: '#3b82f6' } },
+  { id: 'account_security', type: 'custom', position: { x: 660, y: 400 }, data: { label: 'Account Settings', sublabel: 'MFA + Sessions', icon: 'lock', color: '#3b82f6' } },
   { id: 'api_client', type: 'custom', position: { x: 660, y: 270 }, data: { label: 'API Client', sublabel: 'Same-Origin Requests', icon: 'activity', color: '#3b82f6' } },
 
   // API services
