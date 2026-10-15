@@ -84,6 +84,22 @@ class AuthenticationSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["sub"], "user-1")
         self.assertEqual(payload["sid"], "session-1")
 
+    def test_totp_accepts_current_window_and_rejects_invalid_code(self):
+        secret = auth.generate_totp_secret()
+        code = auth.totp_code(secret, timestamp=1_700_000_000)
+        self.assertTrue(auth.verify_totp(code, secret, timestamp=1_700_000_000))
+        self.assertFalse(auth.verify_totp("000000" if code != "000000" else "111111", secret, timestamp=1_700_000_000))
+
+    def test_mfa_secret_is_encrypted_at_rest(self):
+        secret = auth.generate_totp_secret()
+        encrypted = auth.encrypt_mfa_secret(secret)
+        self.assertNotIn(secret, encrypted)
+        self.assertEqual(auth.decrypt_mfa_secret(encrypted), secret)
+
+    def test_recovery_codes_are_normalized_before_hashing(self):
+        code = auth.generate_recovery_codes(1)[0]
+        self.assertEqual(auth.hash_recovery_code(code), auth.hash_recovery_code(code.lower()))
+
 
 if __name__ == "__main__":
     unittest.main()

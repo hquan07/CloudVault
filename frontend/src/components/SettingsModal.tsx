@@ -64,6 +64,9 @@ function securityActionLabel(action: string) {
     SESSION_REVOKED: 'Session revoked',
     SESSIONS_REVOKED: 'All sessions revoked',
     REFRESH_TOKEN_REPLAYED: 'Suspicious session replay blocked',
+    MFA_ENABLED: 'Multi-factor authentication enabled',
+    MFA_DISABLED: 'Multi-factor authentication disabled',
+    MFA_RECOVERY_USED: 'Recovery code used',
   };
   return labels[action] || action.replaceAll('_', ' ').toLowerCase();
 }
@@ -90,6 +93,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
     return Notification.permission;
   });
+  const [mfaPassword, setMfaPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaSetup, setMfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [mfaBusy, setMfaBusy] = useState(false);
 
   const resetMessages = () => {
     setError('');
@@ -266,6 +274,62 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     setSuccess('Recent searches cleared from this browser.');
   };
 
+  const beginMfaSetup = async () => {
+    resetMessages();
+    setMfaBusy(true);
+    try {
+      setMfaSetup(await authApi.setupMfa(mfaPassword));
+      setMfaCode('');
+      setSuccess('Authenticator secret created. Verify one code to finish setup.');
+    } catch (setupError: unknown) {
+      setError(errorMessage(setupError, 'Failed to start MFA setup'));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const enableMfa = async () => {
+    resetMessages();
+    setMfaBusy(true);
+    try {
+      const result = await authApi.enableMfa(mfaCode);
+      setRecoveryCodes(result.recovery_codes);
+      setMfaSetup(null);
+      setMfaPassword('');
+      setMfaCode('');
+      await refreshUser();
+      setSuccess('Multi-factor authentication enabled. Save the recovery codes now.');
+      void loadSecurityEvents();
+    } catch (enableError: unknown) {
+      setError(errorMessage(enableError, 'Failed to enable MFA'));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const disableMfa = async () => {
+    if (!window.confirm('Disable multi-factor authentication and sign out every device?')) return;
+    resetMessages();
+    setMfaBusy(true);
+    try {
+      await authApi.disableMfa(mfaPassword, mfaCode);
+      await logout();
+    } catch (disableError: unknown) {
+      setError(errorMessage(disableError, 'Failed to disable MFA'));
+      setMfaBusy(false);
+    }
+  };
+
+  const downloadRecoveryCodes = () => {
+    const contents = `CloudVault MFA recovery codes\nGenerated: ${new Date().toISOString()}\n\n${recoveryCodes.join('\n')}\n`;
+    const url = URL.createObjectURL(new Blob([contents], { type: 'text/plain' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'cloudvault-recovery-codes.txt';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const sections: Array<{ id: SettingsSection; label: string; icon: typeof UserIcon }> = [
     { id: 'profile', label: 'Profile', icon: UserIcon },
     { id: 'security', label: 'Security', icon: ShieldCheck },
@@ -375,6 +439,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><KeyRound size={15} /> Sign-in method</div><p className="mt-2 capitalize text-sm font-medium text-gray-200">{user.oauth_provider}</p></div>
                   <div className="rounded-xl border border-gray-800 bg-gray-950/50 p-4"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500"><Clock3 size={15} /> Last sign-in</div><p className="mt-2 text-sm font-medium text-gray-200">{user.last_login_at ? new Date(user.last_login_at).toLocaleString() : 'Not recorded'}</p></div>
                 </div>
+
+                <section className={`rounded-2xl border p-5 ${user.mfa_enabled ? 'border-emerald-500/25 bg-emerald-950/10' : 'border-gray-800 bg-gray-950/35'}`}>
+                  <div className="flex items-start gap-3"><div className={`rounded-xl p-2.5 ${user.mfa_enabled ? 'bg-emerald-500/10 text-emerald-300' : 'bg-gray-800 text-cyan-400'}`}><ShieldCheck size={20} /></div><div><h4 className="font-semibold text-white">Authenticator app (TOTP)</h4><p className="mt-1 text-sm text-gray-500">{user.mfa_enabled ? 'A time-based authentication code is required when you sign in.' : 'Add a second sign-in factor compatible with common authenticator apps.'}</p></div><span className={`ml-auto rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${user.mfa_enabled ? 'bg-emerald-500/10 text-emerald-300' : 'bg-gray-800 text-gray-500'}`}>{user.mfa_enabled ? 'Enabled' : 'Disabled'}</span></div>
+
+                  {recoveryCodes.length > 0 && (
+                    <div className="mt-5 rounded-xl border border-amber-500/25 bg-amber-500/5 p-4"><p className="text-sm font-medium text-amber-200">Save these recovery codes now</p><p className="mt-1 text-xs text-gray-500">Each code works once. CloudVault stores only hashes and cannot show them again.</p><div className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-gray-950 p-3 font-mono text-sm text-gray-300 sm:grid-cols-4">{recoveryCodes.map((code) => <span key={code}>{code}</span>)}</div><button type="button" onClick={downloadRecoveryCodes} className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/25 px-3 py-2 text-xs font-medium text-amber-200 hover:bg-amber-500/10"><Download size={15} /> Download codes</button></div>
+                  )}
+
+                  {!user.mfa_enabled && !mfaSetup && recoveryCodes.length === 0 && (
+                    <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="min-w-0 flex-1 text-sm text-gray-400">Current password<input type="password" autoComplete="current-password" value={mfaPassword} onChange={(event) => setMfaPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-cyan-500/60" /></label><button type="button" onClick={() => void beginMfaSetup()} disabled={mfaBusy || !mfaPassword} className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 font-semibold text-gray-950 disabled:opacity-50">{mfaBusy ? <Loader2 size={17} className="animate-spin" /> : <ShieldCheck size={17} />} Set up MFA</button></div>
+                  )}
+
+                  {!user.mfa_enabled && mfaSetup && (
+                    <div className="mt-5 space-y-4"><div className="rounded-xl border border-cyan-500/20 bg-cyan-950/15 p-4"><p className="text-sm text-gray-300">Add this setup key to your authenticator app:</p><code className="mt-2 block break-all rounded-lg bg-gray-950 p-3 font-mono text-sm tracking-widest text-cyan-200">{mfaSetup.secret}</code><a href={mfaSetup.otpauth_uri} className="mt-2 inline-block text-xs text-cyan-400 hover:text-cyan-300">Open in an authenticator app</a></div><div className="flex flex-col gap-3 sm:flex-row sm:items-end"><label className="min-w-0 flex-1 text-sm text-gray-400">Six-digit code<input type="text" inputMode="numeric" autoComplete="one-time-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value.trim())} maxLength={6} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 font-mono tracking-[0.3em] text-white outline-none focus:border-cyan-500/60" /></label><button type="button" onClick={() => void enableMfa()} disabled={mfaBusy || mfaCode.length !== 6} className="flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 font-semibold text-gray-950 disabled:opacity-50">{mfaBusy ? <Loader2 size={17} className="animate-spin" /> : <BadgeCheck size={17} />} Verify & enable</button></div></div>
+                  )}
+
+                  {user.mfa_enabled && recoveryCodes.length === 0 && (
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2"><label className="text-sm text-gray-400">Current password<input type="password" autoComplete="current-password" value={mfaPassword} onChange={(event) => setMfaPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-white outline-none focus:border-red-500/50" /></label><label className="text-sm text-gray-400">Authenticator or recovery code<input type="text" autoComplete="one-time-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value.trim())} className="mt-2 w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 font-mono text-white outline-none focus:border-red-500/50" /></label><div className="sm:col-span-2"><button type="button" onClick={() => void disableMfa()} disabled={mfaBusy || !mfaPassword || mfaCode.length < 6} className="flex items-center gap-2 rounded-xl border border-red-500/30 px-4 py-2.5 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:opacity-50">{mfaBusy ? <Loader2 size={16} className="animate-spin" /> : <ShieldAlert size={16} />} Disable MFA</button></div></div>
+                  )}
+                </section>
 
                 <form onSubmit={changePassword} className="space-y-5 rounded-2xl border border-gray-800 bg-gray-950/35 p-5">
                   <div><h4 className="flex items-center gap-2 font-semibold text-white"><KeyRound className="text-cyan-400" size={19} />Change password</h4><p className="mt-1 text-sm text-gray-500">Changing it revokes every refresh session and requires signing in again.</p></div>

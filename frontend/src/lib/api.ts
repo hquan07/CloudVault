@@ -135,12 +135,17 @@ export interface SecurityEvent {
   created_at: string;
 }
 
+export interface MfaSetup {
+  secret: string;
+  otpauth_uri: string;
+}
+
 /* ── Auth API ── */
 export const authApi = {
   register: (data: { email: string; username: string; password: string }) =>
     request(`${AUTH_BASE}/auth/register`, { method: 'POST', body: JSON.stringify(data) }, false),
 
-  login: (data: { email: string; password: string }) =>
+  login: (data: { email: string; password: string; otp_code?: string }) =>
     request(`${AUTH_BASE}/auth/login`, { method: 'POST', body: JSON.stringify(data) }, false),
 
   logout: () => {
@@ -160,6 +165,21 @@ export const authApi = {
     request<{ detail: string }>(`${AUTH_BASE}/auth/change-password`, {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+
+  setupMfa: (currentPassword: string) =>
+    request<MfaSetup>(`${AUTH_BASE}/auth/mfa/setup`, {
+      method: 'POST', body: JSON.stringify({ current_password: currentPassword }),
+    }),
+
+  enableMfa: (code: string) =>
+    request<{ detail: string; recovery_codes: string[] }>(`${AUTH_BASE}/auth/mfa/enable`, {
+      method: 'POST', body: JSON.stringify({ code }),
+    }),
+
+  disableMfa: (currentPassword: string, code: string) =>
+    request<{ detail: string }>(`${AUTH_BASE}/auth/mfa/disable`, {
+      method: 'POST', body: JSON.stringify({ current_password: currentPassword, code }),
     }),
 
   listSessions: () => request<AuthSession[]>(`${AUTH_BASE}/auth/sessions`),

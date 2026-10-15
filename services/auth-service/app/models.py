@@ -35,6 +35,9 @@ class User(Base):
     )
     is_active = Column(Boolean, nullable=False, default=True)
     is_verified = Column(Boolean, nullable=False, default=False)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)
+    mfa_secret_encrypted = Column(String(1000), nullable=True)
+    mfa_recovery_codes = Column(JSON, nullable=True)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(

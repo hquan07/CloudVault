@@ -19,6 +19,7 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    otp_code: Optional[str] = Field(None, min_length=6, max_length=32)
 
 
 class RefreshRequest(BaseModel):
@@ -35,6 +36,18 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=12, max_length=128)
 
 
+class MfaSetupRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=32)
+
+
+class MfaDisableRequest(MfaCodeRequest):
+    current_password: str = Field(..., min_length=1, max_length=128)
+
+
 # ── Response Schemas ──
 
 class UserResponse(BaseModel):
@@ -45,6 +58,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     is_verified: bool
+    mfa_enabled: bool
     oauth_provider: str
     storage_quota: int
     storage_used: int
@@ -99,6 +113,16 @@ class SecurityEventResponse(BaseModel):
     ip_address: Optional[str] = None
     user_agent: Optional[str] = None
     created_at: datetime
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaEnableResponse(BaseModel):
+    detail: str
+    recovery_codes: list[str]
 
 
 class ProjectCreateRequest(BaseModel):

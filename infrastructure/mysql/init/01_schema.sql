@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
     role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_secret_encrypted VARCHAR(1000),
+    mfa_recovery_codes JSON,
     last_login_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -338,7 +341,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
         'SHARE_CREATED', 'SHARE_ACCESSED', 'SHARE_REVOKED',
         'PASSWORD_CHANGED', 'QUOTA_EXCEEDED',
         'USER_LOGIN_FAILED', 'SESSION_REVOKED', 'SESSIONS_REVOKED',
-        'REFRESH_TOKEN_REPLAYED'
+        'REFRESH_TOKEN_REPLAYED', 'MFA_ENABLED', 'MFA_DISABLED',
+        'MFA_RECOVERY_USED'
     ) NOT NULL,
     resource_type ENUM('user', 'file', 'folder', 'share') NOT NULL,
     resource_id CHAR(36),

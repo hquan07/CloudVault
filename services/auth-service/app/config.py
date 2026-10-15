@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Use a dedicated random value in production. Empty keeps local upgrades
+    # compatible by deriving an encryption key from JWT_SECRET_KEY.
+    MFA_ENCRYPTION_KEY: str = ""
 
     # Authentication abuse protection. Limits are per client/identity pair.
     AUTH_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, ge=10, le=3600)

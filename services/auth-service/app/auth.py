@@ -2,15 +2,20 @@
 CloudVault — Auth Service JWT & Password Utilities
 """
 
+import base64
 import hashlib
+import hmac
 import logging
 import secrets
+import struct
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
 import redis.asyncio as aioredis
+from cryptography.fernet import Fernet
 
 from app.config import settings
 
@@ -78,6 +83,55 @@ def create_service_token() -> tuple[str, str, str]:
     prefix = f"cvp_{uuid.uuid4().hex[:12]}"
     raw = f"{prefix}.{secrets.token_urlsafe(36)}"
     return raw, prefix, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# ── TOTP multi-factor authentication ──
+
+def _mfa_cipher() -> Fernet:
+    source = settings.MFA_ENCRYPTION_KEY or settings.JWT_SECRET_KEY
+    key = base64.urlsafe_b64encode(hashlib.sha256(source.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def encrypt_mfa_secret(secret: str) -> str:
+    return _mfa_cipher().encrypt(secret.encode("ascii")).decode("ascii")
+
+
+def decrypt_mfa_secret(encrypted: str) -> str:
+    return _mfa_cipher().decrypt(encrypted.encode("ascii")).decode("ascii")
+
+
+def totp_code(secret: str, timestamp: int | None = None) -> str:
+    normalized = secret.upper() + "=" * ((8 - len(secret) % 8) % 8)
+    key = base64.b32decode(normalized)
+    counter = int((timestamp if timestamp is not None else time.time()) // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
+
+
+def verify_totp(code: str, secret: str, timestamp: int | None = None) -> bool:
+    if not code.isdigit() or len(code) != 6:
+        return False
+    now = timestamp if timestamp is not None else int(time.time())
+    return any(
+        secrets.compare_digest(code, totp_code(secret, now + offset * 30))
+        for offset in (-1, 0, 1)
+    )
+
+
+def generate_recovery_codes(count: int = 8) -> list[str]:
+    return [f"{secrets.token_hex(3).upper()}-{secrets.token_hex(3).upper()}" for _ in range(count)]
+
+
+def hash_recovery_code(code: str) -> str:
+    normalized = code.strip().upper().replace(" ", "")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def decode_access_token(token: str) -> dict:

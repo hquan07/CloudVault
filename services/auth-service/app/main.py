@@ -12,9 +12,11 @@ Endpoints match the frontend api.ts contract:
 """
 
 import hashlib
+import hmac
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +34,7 @@ from app.models import (
 )
 from app.schemas import (
     RegisterRequest, LoginRequest, RefreshRequest, ChangePasswordRequest,
+    MfaCodeRequest, MfaDisableRequest, MfaEnableResponse, MfaSetupRequest, MfaSetupResponse,
     UpdateProfileRequest, AuthResponse, MeResponse,
     MessageResponse, SecurityEventResponse, SessionResponse, UserResponse, TokenPair,
     AdminStatsResponse, ProjectCreateRequest, ProjectDeleteRequest, ProjectUpdateRequest,
@@ -45,6 +48,8 @@ from app.auth import (
     decode_access_token, blacklist_token, is_token_blacklisted,
     init_redis, close_redis, create_service_token,
     enforce_rate_limit, RateLimitExceeded,
+    decrypt_mfa_secret, encrypt_mfa_secret, generate_recovery_codes,
+    generate_totp_secret, hash_recovery_code, verify_totp,
 )
 from typing import List
 from pydantic import BaseModel
@@ -135,6 +140,7 @@ def _user_response(user: User) -> UserResponse:
         role=user.role,
         is_active=user.is_active,
         is_verified=user.is_verified,
+        mfa_enabled=user.mfa_enabled,
         oauth_provider=user.oauth_provider,
         storage_quota=user.storage_quota,
         storage_used=user.storage_used,
@@ -189,6 +195,26 @@ def _add_security_audit(
         user_agent=user_agent,
         details_json=details or {},
     ))
+
+
+def _verify_mfa_code(user: User, code: str) -> tuple[bool, bool]:
+    """Return (valid, used_recovery_code), consuming recovery codes in memory."""
+    if not user.mfa_secret_encrypted:
+        return False, False
+    try:
+        if verify_totp(code.strip(), decrypt_mfa_secret(user.mfa_secret_encrypted)):
+            return True, False
+    except Exception:
+        return False, False
+
+    candidate = hash_recovery_code(code)
+    recovery_codes = list(user.mfa_recovery_codes or [])
+    for stored in recovery_codes:
+        if hmac.compare_digest(stored, candidate):
+            recovery_codes.remove(stored)
+            user.mfa_recovery_codes = recovery_codes
+            return True, True
+    return False, False
 
 
 async def _enforce_auth_rate_limit(
@@ -295,6 +321,23 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
 
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if user.mfa_enabled:
+        if not req.otp_code:
+            raise HTTPException(status_code=428, detail="MFA_REQUIRED")
+        valid_mfa, used_recovery = _verify_mfa_code(user, req.otp_code)
+        if not valid_mfa:
+            _add_security_audit(
+                db,
+                "USER_LOGIN_FAILED",
+                request,
+                user_id=user.id,
+                details={"reason": "invalid_mfa"},
+            )
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid authentication code")
+        if used_recovery:
+            _add_security_audit(db, "MFA_RECOVERY_USED", request, user_id=user.id)
 
     # Update last login
     user.last_login_at = datetime.now(timezone.utc)
@@ -471,6 +514,89 @@ async def change_password(
     return MessageResponse(detail="Password changed. Sign in again on all devices.")
 
 
+@app.post("/api/v1/auth/mfa/setup", response_model=MfaSetupResponse)
+async def setup_mfa(
+    req: MfaSetupRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="Multi-factor authentication is already enabled")
+    if not user.password_hash or not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    secret = generate_totp_secret()
+    user.mfa_secret_encrypted = encrypt_mfa_secret(secret)
+    user.mfa_recovery_codes = None
+    await db.commit()
+    label = quote(f"CloudVault:{user.email}")
+    uri = f"otpauth://totp/{label}?secret={secret}&issuer=CloudVault&algorithm=SHA1&digits=6&period=30"
+    return MfaSetupResponse(secret=secret, otpauth_uri=uri)
+
+
+@app.post("/api/v1/auth/mfa/enable", response_model=MfaEnableResponse)
+async def enable_mfa(
+    req: MfaCodeRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="Multi-factor authentication is already enabled")
+    if not user.mfa_secret_encrypted:
+        raise HTTPException(status_code=409, detail="Start MFA setup before enabling it")
+    try:
+        valid = verify_totp(req.code.strip(), decrypt_mfa_secret(user.mfa_secret_encrypted))
+    except Exception:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid authentication code")
+    recovery_codes = generate_recovery_codes()
+    user.mfa_enabled = True
+    user.mfa_recovery_codes = [hash_recovery_code(code) for code in recovery_codes]
+    _add_security_audit(db, "MFA_ENABLED", request, user_id=user.id)
+    await db.commit()
+    return MfaEnableResponse(
+        detail="Multi-factor authentication enabled",
+        recovery_codes=recovery_codes,
+    )
+
+
+@app.post("/api/v1/auth/mfa/disable", response_model=MessageResponse)
+async def disable_mfa(
+    req: MfaDisableRequest,
+    request: Request,
+    authorization: str = Header(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="Multi-factor authentication is not enabled")
+    if not user.password_hash or not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    valid, used_recovery = _verify_mfa_code(user, req.code)
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid authentication code")
+    user.mfa_enabled = False
+    user.mfa_secret_encrypted = None
+    user.mfa_recovery_codes = None
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked == False)
+        .values(revoked=True, revoked_at=now)
+    )
+    _add_security_audit(
+        db,
+        "MFA_DISABLED",
+        request,
+        user_id=user.id,
+        details={"used_recovery_code": used_recovery, "refresh_sessions_revoked": True},
+    )
+    await db.commit()
+    await _blacklist_authorization_token(authorization)
+    return MessageResponse(detail="Multi-factor authentication disabled. Sign in again.")
+
+
 @app.get("/api/v1/auth/sessions", response_model=List[SessionResponse])
 async def list_sessions(
     authorization: str = Header(None),
@@ -522,6 +648,9 @@ async def list_security_events(
         "SESSION_REVOKED",
         "SESSIONS_REVOKED",
         "REFRESH_TOKEN_REPLAYED",
+        "MFA_ENABLED",
+        "MFA_DISABLED",
+        "MFA_RECOVERY_USED",
     )
     result = await db.execute(
         select(AuditLog)
