@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     MINIO_ROOT_PASSWORD: str = Field(min_length=32)
     MINIO_BUCKET_FILES: str = "cloudvault-files"
 
+    # Browser origins allowed only for direct API development.
+    CORS_ALLOWED_ORIGINS: str = "http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000"
+
     # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str = "kafka:29092"
     KAFKA_TOPIC_FILE_EVENTS: str = "file-events"
@@ -55,9 +58,14 @@ class Settings(BaseSettings):
     def redis_url(self) -> str:
         return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 settings = Settings()

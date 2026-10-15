@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     PROJECT_MULTIPART_URL_TTL_SECONDS: int = 900
     PROJECT_MULTIPART_SESSION_TTL_HOURS: int = 6
 
+    # Browser origins allowed only for direct API development.
+    CORS_ALLOWED_ORIGINS: str = "http://localhost,http://localhost:3000,http://127.0.0.1,http://127.0.0.1:3000"
+
     # JWT
     JWT_SECRET_KEY: str = Field(min_length=32)
     JWT_ALGORITHM: str = "HS256"
@@ -53,9 +56,14 @@ class Settings(BaseSettings):
     def redis_url(self) -> str:
         return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 settings = Settings()

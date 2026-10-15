@@ -1,3 +1,9 @@
+x-runtime-hardening: &runtime-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   # DATABASE — MySQL 8.0
   mysql:
@@ -343,6 +349,7 @@ services:
 
   # FRONTEND SERVICE
   frontend:
+    <<: *runtime-hardening
     build: ./frontend
     container_name: cloudvault-frontend
     restart: unless-stopped
@@ -354,6 +361,7 @@ services:
 
   # BACKEND SERVICES
   auth-service:
+    <<: *runtime-hardening
     build: ./services/auth-service
     container_name: cloudvault-auth
     restart: unless-stopped
@@ -363,7 +371,7 @@ services:
     ports:
       - "${APP_BIND_ADDRESS:-127.0.0.1}:8001:8000"
     volumes:
-      - ./services/auth-service:/app
+      - ./services/auth-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -373,6 +381,7 @@ services:
       - cloudvault-network
 
   file-service:
+    <<: *runtime-hardening
     build: ./services/file-service
     container_name: cloudvault-files
     restart: unless-stopped
@@ -384,7 +393,7 @@ services:
     extra_hosts:
       - "localhost:host-gateway"
     volumes:
-      - ./services/file-service:/app
+      - ./services/file-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -398,6 +407,7 @@ services:
       - cloudvault-network
 
   metadata-service:
+    <<: *runtime-hardening
     build: ./services/metadata-service
     container_name: cloudvault-metadata
     restart: unless-stopped
@@ -407,7 +417,7 @@ services:
     ports:
       - "${APP_BIND_ADDRESS:-127.0.0.1}:8003:8000"
     volumes:
-      - ./services/metadata-service:/app
+      - ./services/metadata-service:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -420,6 +430,7 @@ services:
 
   # KAFKA WORKERS
   thumbnail-worker:
+    <<: *runtime-hardening
     build:
       context: .
       dockerfile: workers/thumbnail-worker/Dockerfile
@@ -440,6 +451,7 @@ services:
       - cloudvault-network
 
   search-indexer:
+    <<: *runtime-hardening
     build:
       context: .
       dockerfile: workers/search-indexer/Dockerfile
@@ -460,6 +472,7 @@ services:
       - cloudvault-network
 
   audit-logger:
+    <<: *runtime-hardening
     build:
       context: .
       dockerfile: workers/audit-logger/Dockerfile
@@ -478,12 +491,13 @@ services:
       - cloudvault-network
 
   project-operations:
+    <<: *runtime-hardening
     build: ./workers/project-operations
     container_name: cloudvault-project-operations
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./workers/project-operations:/app
+      - ./workers/project-operations:/app:ro
     depends_on:
       mysql-migrate:
         condition: service_completed_successfully
@@ -499,6 +513,7 @@ services:
       - cloudvault-network
 
   zip-extractor-worker:
+    <<: *runtime-hardening
     build:
       context: .
       dockerfile: workers/zip-extractor-worker/Dockerfile
