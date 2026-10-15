@@ -258,7 +258,9 @@ bind to loopback; persistence and messaging services stay Docker-internal.
   not appear in request URLs or access logs.
 - Account deletion is never a direct user-row delete: ownership blockers are
   resolved first, sessions are revoked immediately, and a dedicated worker
-  purges personal objects before anonymizing identity data.
+  purges personal objects before anonymizing identity data. Administrator
+  accounts are protected from this workflow; only `user` accounts can request
+  deletion.
 - Application containers run without Linux capabilities, cannot gain new
   privileges, use non-root users, and mount development source read-only.
 - Keep `APP_BIND_ADDRESS` and `INFRA_BIND_ADDRESS` on `127.0.0.1` unless a

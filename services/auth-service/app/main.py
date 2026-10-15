@@ -967,15 +967,7 @@ async def _build_account_deletion_impact(
     if owned_projects:
         blockers.append("OWNED_PROJECTS")
     if user.role == "admin":
-        active_admin_count = await db.scalar(
-            select(func.count(User.id)).where(
-                User.role == "admin",
-                User.is_active.is_(True),
-                User.deletion_status == "active",
-            )
-        ) or 0
-        if active_admin_count <= 1:
-            blockers.append("LAST_SYSTEM_ADMIN")
+        blockers.append("SYSTEM_ADMIN")
 
     return AccountDeletionImpactResponse(
         deletion_status=user.deletion_status,

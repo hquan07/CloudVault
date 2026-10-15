@@ -57,6 +57,17 @@ class AccountDeletionContractTests(unittest.TestCase):
         ):
             self.assertIn(column, migration)
 
+    def test_admin_accounts_are_always_blocked_from_self_service_deletion(self):
+        auth_source = (ROOT / "services/auth-service/app/main.py").read_text()
+        settings_source = (ROOT / "frontend/src/components/SettingsModal.tsx").read_text()
+
+        self.assertIn(
+            'if user.role == "admin":\n        blockers.append("SYSTEM_ADMIN")',
+            auth_source,
+        )
+        self.assertNotIn('blockers.append("LAST_SYSTEM_ADMIN")', auth_source)
+        self.assertIn("blockers.includes('SYSTEM_ADMIN')", settings_source)
+
 
 if __name__ == "__main__":
     unittest.main()

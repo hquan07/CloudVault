@@ -200,8 +200,9 @@ Account deletion is a delayed lifecycle rather than a direct `DELETE users`:
 
 1. Auth Service reports personal storage, sessions, shares, project memberships,
    service-account provenance and owned projects.
-2. Owned projects must be transferred to another active project administrator;
-   the last active system administrator cannot schedule deletion.
+2. Administrator accounts are excluded from self-service deletion. A `user`
+   account must transfer every owned project to another active project
+   administrator before it can schedule deletion.
 3. Password and MFA confirmation moves the account to `pending`, revokes refresh
    sessions, blacklists the current access token and starts a configurable
    seven-day cancellation window.
