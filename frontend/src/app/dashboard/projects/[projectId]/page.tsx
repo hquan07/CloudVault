@@ -17,6 +17,7 @@ import { formatBytes } from '@/lib/utils';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 import { ProjectUploadQueue } from '@/components/ProjectUploadQueue';
 import { useAuth } from '@/lib/auth-context';
+import { beginTrashDrag, endTrashDrag, PROJECT_DRAG_TYPE, TRASH_DROP_EVENT, type TrashDropPayload } from '@/lib/drag-to-trash';
 
 type Tab = 'files' | 'trash' | 'members' | 'integrations' | 'operations' | 'policy' | 'activity';
 
@@ -345,10 +346,14 @@ export default function ProjectDetailPage() {
     target: ProjectTrashDragTarget,
   ) => {
     event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('application/x-cloudvault-project-item', JSON.stringify({
+    const payload: TrashDropPayload = {
+      scope: 'project',
+      projectId,
       type: target.type,
       id: target.item.id,
-    }));
+    };
+    beginTrashDrag(payload);
+    event.dataTransfer.setData(PROJECT_DRAG_TYPE, JSON.stringify(payload));
     setTrashDragTarget(target);
   };
 
@@ -368,6 +373,27 @@ export default function ProjectDetailPage() {
     }
     void deleteFile(target.item);
   };
+
+  useEffect(() => {
+    const handleSidebarTrashDrop = (event: Event) => {
+      const payload = (event as CustomEvent<TrashDropPayload>).detail;
+      if (payload.scope !== 'project' || payload.projectId !== projectId) return;
+      if (payload.type === 'folder') {
+        const folder = folders.find(item => item.id === payload.id);
+        if (folder) void deleteFolder(folder);
+        return;
+      }
+      const file = files.find(item => item.id === payload.id);
+      if (!file) return;
+      if (selectedFileIds.has(file.id) && selectedFileIds.size > 1) {
+        void bulkDeleteFiles();
+        return;
+      }
+      void deleteFile(file);
+    };
+    window.addEventListener(TRASH_DROP_EVENT, handleSidebarTrashDrop);
+    return () => window.removeEventListener(TRASH_DROP_EVENT, handleSidebarTrashDrop);
+  }, [files, folders, projectId, selectedFileIds]);
 
   const moveFile = async (item: ProjectFile, destinationId: string) => {
     try {
@@ -634,7 +660,7 @@ export default function ProjectDetailPage() {
 
           {folders.length > 0 && (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {folders.map((folder) => <div key={folder.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'folder', item: folder })} onDragEnd={() => setTrashDragTarget(null)} className="group flex items-center justify-between rounded-xl border border-gray-800 bg-gray-900 p-3 hover:border-cyan-500/30"><button onClick={() => openFolder(folder)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><span className="rounded-lg bg-cyan-500/10 p-2 text-cyan-400"><Folder size={18} /></span><span className="truncate text-sm font-medium text-gray-200">{folder.name}</span></button>{canWrite && <button onClick={() => void deleteFolder(folder)} title="Move empty folder to trash" className="rounded-lg p-2 text-gray-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"><Trash2 size={15} /></button>}</div>)}
+              {folders.map((folder) => <div key={folder.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'folder', item: folder })} onDragEnd={() => { endTrashDrag(); setTrashDragTarget(null); }} className="group flex items-center justify-between rounded-xl border border-gray-800 bg-gray-900 p-3 hover:border-cyan-500/30"><button onClick={() => openFolder(folder)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><span className="rounded-lg bg-cyan-500/10 p-2 text-cyan-400"><Folder size={18} /></span><span className="truncate text-sm font-medium text-gray-200">{folder.name}</span></button>{canWrite && <button onClick={() => void deleteFolder(folder)} title="Move empty folder to trash" className="rounded-lg p-2 text-gray-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"><Trash2 size={15} /></button>}</div>)}
             </div>
           )}
 
@@ -679,7 +705,7 @@ export default function ProjectDetailPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-800">
                     {files.map((item) => (
-                      <tr key={item.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'file', item })} onDragEnd={() => setTrashDragTarget(null)} className="hover:bg-gray-800/40">
+                      <tr key={item.id} draggable={canWrite} onDragStart={(event) => handleItemDragStart(event, { type: 'file', item })} onDragEnd={() => { endTrashDrag(); setTrashDragTarget(null); }} className="hover:bg-gray-800/40">
                         <td className="p-4"><div className="flex items-start gap-3"><input type="checkbox" checked={selectedFileIds.has(item.id)} onChange={() => toggleFileSelection(item.id)} className="mt-1 accent-cyan-500" /><div><button onClick={() => setPreviewFile(item)} className="font-medium text-gray-100 hover:text-cyan-300">{item.original_name}</button><div className="mt-1 font-mono text-[11px] text-gray-600">{item.checksum_sha256.slice(0, 16)}…</div></div></div></td>
                         <td className="p-4 text-gray-400">{String(item.metadata.artifact_type || '—')}</td>
                         <td className="p-4 text-gray-400">{formatBytes(item.size)}</td>

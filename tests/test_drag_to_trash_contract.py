@@ -6,11 +6,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_personal_drive_exposes_internal_drag_to_trash():
     source = (ROOT / "frontend/src/app/dashboard/page.tsx").read_text()
+    drag_contract = (ROOT / "frontend/src/lib/drag-to-trash.ts").read_text()
 
-    assert "application/x-cloudvault-item" in source
+    assert "application/x-cloudvault-item" in drag_contract
+    assert "__cloudvaultTrashDragPayload" in drag_contract
+    assert "beginTrashDrag(payload)" in source
     assert "handleTrashDrop" in source
     assert "Move folder to Trash?" in source
     assert "Only empty folders can be moved" in source
+
+
+def test_sidebar_trash_is_a_stable_drop_target():
+    source = (ROOT / "frontend/src/app/dashboard/layout.tsx").read_text()
+
+    assert "handleTrashDragOver" in source
+    assert "handleTrashDrop" in source
+    assert "TRASH_DROP_EVENT" in source
+    assert "trashDropActive" in source
 
 
 def test_project_drive_exposes_internal_drag_to_trash():

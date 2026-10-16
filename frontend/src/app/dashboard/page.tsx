@@ -9,6 +9,7 @@ import { useAuth } from '@/lib/auth-context';
 import { FilePreviewModal } from '@/components/FilePreviewModal';
 import { ShareModal } from '@/components/ShareModal';
 import { ShareFolderModal } from '@/components/ShareFolderModal';
+import { beginTrashDrag, endTrashDrag, PERSONAL_DRAG_TYPE, TRASH_DROP_EVENT, type TrashDropPayload } from '@/lib/drag-to-trash';
 
 export interface FileItem {
   id: string;
@@ -38,8 +39,6 @@ export interface FolderItem {
 type TrashDragTarget =
   | { type: 'file'; item: FileItem }
   | { type: 'folder'; item: FolderItem };
-
-const INTERNAL_DRAG_TYPE = 'application/x-cloudvault-item';
 
 type UploadTask = {
   id: string;
@@ -331,10 +330,13 @@ export default function DrivePage() {
   const handleItemDragStart = (event: React.DragEvent, target: TrashDragTarget) => {
     event.stopPropagation();
     event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData(INTERNAL_DRAG_TYPE, JSON.stringify({
+    const payload: TrashDropPayload = {
+      scope: 'personal',
       type: target.type,
       id: target.item.id,
-    }));
+    };
+    beginTrashDrag(payload);
+    event.dataTransfer.setData(PERSONAL_DRAG_TYPE, JSON.stringify(payload));
     setTrashDragTarget(target);
     setIsDragActive(false);
   };
@@ -356,6 +358,27 @@ export default function DrivePage() {
     );
   };
 
+  useEffect(() => {
+    const handleSidebarTrashDrop = (event: Event) => {
+      const payload = (event as CustomEvent<TrashDropPayload>).detail;
+      if (payload.scope !== 'personal') return;
+      if (payload.type === 'folder') {
+        const folder = folders.find(item => item.id === payload.id);
+        if (folder) setFolderDeleteTarget(folder);
+        return;
+      }
+      const file = files.find(item => item.id === payload.id);
+      if (!file) return;
+      setDeleteTargets(
+        selectedIds.has(file.id) && selectedIds.size > 1
+          ? [...selectedIds]
+          : [file.id],
+      );
+    };
+    window.addEventListener(TRASH_DROP_EVENT, handleSidebarTrashDrop);
+    return () => window.removeEventListener(TRASH_DROP_EVENT, handleSidebarTrashDrop);
+  }, [files, folders, selectedIds]);
+
   const handleNavigate = (folder: FolderItem) => {
     setCurrentFolderId(folder.id);
     setFolderPath([...folderPath, { id: folder.id, name: folder.name }]);
@@ -371,13 +394,13 @@ export default function DrivePage() {
   // Drag & Drop Handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
+    if (e.dataTransfer.types.includes(PERSONAL_DRAG_TYPE)) return;
     setIsDragActive(true);
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
+    if (e.dataTransfer.types.includes(PERSONAL_DRAG_TYPE)) return;
     // Prevent flickering when dragging over child elements
     if (e.currentTarget.contains(e.relatedTarget as Node)) return;
     setIsDragActive(false);
@@ -385,7 +408,7 @@ export default function DrivePage() {
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE)) return;
+    if (e.dataTransfer.types.includes(PERSONAL_DRAG_TYPE)) return;
     setIsDragActive(false);
     
     const items = e.dataTransfer.items;
@@ -579,7 +602,7 @@ export default function DrivePage() {
                 key={folder.id} 
                 draggable
                 onDragStartCapture={(event) => handleItemDragStart(event, { type: 'folder', item: folder })}
-                onDragEndCapture={() => setTrashDragTarget(null)}
+                onDragEndCapture={() => { endTrashDrag(); setTrashDragTarget(null); }}
                 className={`group bg-gray-900 border border-gray-700 p-5 hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex items-center gap-4 ${viewMode === 'grid' ? 'rounded-2xl' : 'rounded-xl'}`}
               onClick={() => handleNavigate(folder)}
               onContextMenu={(e) => handleContextMenu(e, folder, 'folder')}
@@ -612,7 +635,7 @@ export default function DrivePage() {
               key={file.id} 
               draggable
               onDragStartCapture={(event) => handleItemDragStart(event, { type: 'file', item: file })}
-              onDragEndCapture={() => setTrashDragTarget(null)}
+              onDragEndCapture={() => { endTrashDrag(); setTrashDragTarget(null); }}
               className={`group relative bg-gray-900 border p-5 transition-all hover:shadow-lg hover:shadow-cyan-900/10 cursor-pointer flex ${selectedIds.has(file.id) ? 'border-cyan-500 ring-1 ring-cyan-500/40' : 'border-gray-800 hover:border-cyan-500/30'} ${viewMode === 'grid' ? 'rounded-2xl flex-col h-full' : 'rounded-xl flex-row items-center gap-4'}`}
               onClick={() => selectedIds.size > 0 ? toggleSelection(file.id) : setPreviewFile(file)}
               onContextMenu={(e) => handleContextMenu(e, file, 'file')}

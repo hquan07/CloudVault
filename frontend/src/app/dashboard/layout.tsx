@@ -1,12 +1,19 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { type DragEvent, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { Cloud, Folder, Clock, Star, Trash2, Settings, LogOut, Search, Menu, Shield, Network, PieChart, Users, Activity, FolderKanban, X, BarChart3 } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
 import { SettingsModal } from '@/components/SettingsModal';
+import {
+  endTrashDrag,
+  PERSONAL_DRAG_TYPE,
+  PROJECT_DRAG_TYPE,
+  readTrashDropPayload,
+  TRASH_DROP_EVENT,
+} from '@/lib/drag-to-trash';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, loading, logout } = useAuth();
@@ -15,6 +22,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [showSettings, setShowSettings] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
+  const [trashDropActive, setTrashDropActive] = useState(false);
   const mobileCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -75,6 +83,33 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const usagePercent = Math.min(100, (user.storage_used / user.storage_quota) * 100);
+
+  const isCloudVaultDrag = (event: DragEvent) => Boolean(
+    readTrashDropPayload(event.dataTransfer)
+    || event.dataTransfer.types.includes(PERSONAL_DRAG_TYPE)
+    || event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)
+  );
+
+  const handleTrashDragOver = (event: DragEvent) => {
+    if (!isCloudVaultDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    setTrashDropActive(true);
+  };
+
+  const handleTrashDrop = (event: DragEvent) => {
+    if (!isCloudVaultDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setTrashDropActive(false);
+    const payload = readTrashDropPayload(event.dataTransfer);
+    if (payload) {
+      window.dispatchEvent(new CustomEvent(TRASH_DROP_EVENT, { detail: payload }));
+      endTrashDrag();
+    }
+  };
+
   const renderSidebarContent = (mobile = false) => (
     <>
       <div className="flex h-16 items-center justify-between border-b border-gray-800 px-6">
@@ -101,19 +136,47 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             item.path !== '/dashboard' && pathname.startsWith(`${item.path}/`)
           );
           const Icon = item.icon;
+          const itemClassName = `flex w-full items-center space-x-3 rounded-xl px-4 py-3 text-left transition-all duration-200 ${
+            item.name === 'Trash' && trashDropActive
+              ? 'scale-[1.02] border border-red-400 bg-red-500/20 font-medium text-red-300 shadow-lg shadow-red-950/30'
+              : isActive
+              ? 'bg-cyan-500/10 font-medium text-cyan-400'
+              : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+          }`;
+          const itemContent = (
+            <>
+              <Icon size={20} className={item.name === 'Trash' && trashDropActive ? 'text-red-300' : isActive ? 'text-cyan-400' : 'text-gray-500'} />
+              <span>{item.name}</span>
+              {item.name === 'Trash' && trashDropActive && <span className="ml-auto text-[10px] uppercase tracking-wide">Drop</span>}
+            </>
+          );
+          if (item.name === 'Trash') {
+            return (
+              <button
+                key={item.name}
+                type="button"
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => router.push(item.path)}
+                onDragEnter={handleTrashDragOver}
+                onDragOver={handleTrashDragOver}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node)) setTrashDropActive(false);
+                }}
+                onDropCapture={handleTrashDrop}
+                className={itemClassName}
+              >
+                {itemContent}
+              </button>
+            );
+          }
           return (
             <Link
               key={item.name}
               href={item.path}
               aria-current={isActive ? 'page' : undefined}
-              className={`flex items-center space-x-3 rounded-xl px-4 py-3 transition-all duration-200 ${
-                isActive
-                  ? 'bg-cyan-500/10 font-medium text-cyan-400'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-              }`}
+              className={itemClassName}
             >
-              <Icon size={20} className={isActive ? 'text-cyan-400' : 'text-gray-500'} />
-              <span>{item.name}</span>
+              {itemContent}
             </Link>
           );
         })}
